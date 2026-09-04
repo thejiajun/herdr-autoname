@@ -39,7 +39,7 @@ INJECTED_TURN = re.compile(
 FRAME_LINE = re.compile(r"^[\s\u2502\u251c\u2514\u250c\u2510\u2518\u2500\u253c\u2524"
                         r"\u258c\u2588\u2591\u254c\u256d\u256e\u2570\u256f=+|-]{12,}")
 CONFIG_DUMP = re.compile(r"^[\w.\-]+=[^\s]*$")
-PANE_MAX_DISPLAY_WIDTH = 24
+PANE_MAX_DISPLAY_WIDTH = 28
 DEEPSEEK_WORKSPACES_PER_REQUEST = 3
 DEFAULT_WORKSPACES_PER_REQUEST = 30
 REQUEST_LOG_DB = os.path.expanduser("~/.local/share/herdr-autoname/requests.db")
@@ -90,7 +90,7 @@ SYSTEM_PROMPT = """给 Herdr 工作空间命名。输入：{"w":[{"n":"当前wor
 - 必须覆盖输入中的每一项，不得增删或调换顺序。
 - Workspace：一个相关 emoji + 当前一段工作的稳定主题，中文优先，不加序号。
 - Tab：使用相同 emoji + 更短的主题分类。
-- Pane 只描述最近对话中的下一步动作，不概括整段会话。使用「相同 emoji + 明确动词 + 对象」；emoji 后最多 9 个汉字，一个英文词算两个汉字。
+- Pane 只描述最近对话中的下一步动作，不概括整段会话。使用「相同 emoji + 明确动词 + 对象」；emoji 后最多 11 个汉字，一个英文词算两个汉字。
 - 极力压缩但保留动作和对象，删除可推断的过程词。推荐：「⚡ 合并Store轮询」「🚚 部署Tunnel到Hornet」「🏷️ 按近两轮命名Pane」「📊 显示全部Tracker账号」。
 - 禁止使用「把……好」句式。不要写成长句，不要使用「处理问题」「继续工作」「代码优化」「配置到环境变量」「基于最近两轮对话」等空泛、冗长或角色式名称。
 - 同一 workspace 的三层使用相同 emoji。
