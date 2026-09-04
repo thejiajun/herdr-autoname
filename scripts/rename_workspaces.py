@@ -71,9 +71,9 @@ SYSTEM_PROMPT = """给 Herdr 工作空间命名。输入：{"w":[{"n":"当前wor
 - 必须覆盖输入中的每一项，不得增删或调换顺序。
 - Workspace：一个相关 emoji + 当前一段工作的稳定主题，中文优先，不加序号。
 - Tab：使用相同 emoji + 更短的主题分类。
-- Pane 只描述最近对话中的下一步动作，不概括整段会话。使用「相同 emoji + 把 + 对象 + 动作」；emoji 后最多 9 个汉字，一个英文词算两个汉字。
-- 极力压缩但保留对象和动作，删除可推断的过程词。推荐：「⚡ 把轮询并入Store」「🚚 把Tunnel部署Hornet」「🏷️ 把Pane改按近两轮」「📊 把账号全显Tracker」。
-- 不要写成长句，不要使用「处理问题」「继续工作」「代码优化」「配置到环境变量」「基于最近两轮对话」等空泛、冗长或角色式名称。
+- Pane 只描述最近对话中的下一步动作，不概括整段会话。使用「相同 emoji + 明确动词 + 对象」；emoji 后最多 9 个汉字，一个英文词算两个汉字。
+- 极力压缩但保留动作和对象，删除可推断的过程词。推荐：「⚡ 合并Store轮询」「🚚 部署Tunnel到Hornet」「🏷️ 按近两轮命名Pane」「📊 显示全部Tracker账号」。
+- 禁止使用「把……好」句式。不要写成长句，不要使用「处理问题」「继续工作」「代码优化」「配置到环境变量」「基于最近两轮对话」等空泛、冗长或角色式名称。
 - 同一 workspace 的三层使用相同 emoji。
 - Workspace/Tab 可在旧名称准确时保留；Pane 必须按最近两轮的当前动作重新判断。
 - 只输出 JSON，不要解释。"""
@@ -1156,11 +1156,12 @@ def configure_sidebar(rows, names=None):
 
 def sync_project_metadata(rows, names=None):
     renamed = {item["workspace_id"]: item["workspace"] for item in (names or [])}
+    contexts = grouped_sidebar_contexts(rows)
     updated = 0
     for row in rows:
         workspace_name = renamed.get(row["workspace_id"], row["current_workspace"])
         workspace_name = workspace_name.strip().strip("[]").strip()
-        context = sidebar_context(row)
+        context = contexts[row["workspace_id"]]
         tokens = [f"workspace_label=[{workspace_name}]"]
         if context:
             tokens.append(f"context={context}")
@@ -1196,28 +1197,44 @@ def sidebar_context(row):
     return context
 
 
+def grouped_sidebar_contexts(rows):
+    contexts = {}
+    seen = set()
+    for row in rows:
+        key = row["group_key"]
+        contexts[row["workspace_id"]] = sidebar_context(row) if key not in seen else ""
+        seen.add(key)
+    return contexts
+
+
 def sidebar_preview_data(names, rows):
     named = {item["workspace_id"]: item for item in names}
     rows_by_id = {row["workspace_id"]: row for row in rows}
     ordered_rows = [rows_by_id[item] for item in grouped_workspace_ids(rows)]
     spaces = []
     agents = []
+    contexts = grouped_sidebar_contexts(ordered_rows)
     status_rank = {
         "working": 0, "waiting": 1, "error": 2, "idle": 3,
         "completed": 4, "done": 4, "unknown": 5,
     }
+    previous_group = None
     for row in ordered_rows:
         item = named[row["workspace_id"]]
+        if previous_group is not None and row["group_key"] != previous_group:
+            spaces.append({"separator": True})
+            agents.append({"separator": True})
         statuses = [pane["status"] for pane in row["panes"]] or ["unknown"]
         status = min(statuses, key=lambda value: status_rank.get(value, 5))
         spaces.append({
             "workspace_id": row["workspace_id"],
             "status": status,
             "label": f"[{item['workspace'].strip().strip('[]').strip()}]",
-            "context": sidebar_context(row),
+            "context": contexts[row["workspace_id"]],
         })
         for pane in row["panes"]:
             agents.append({
+                "workspace_id": row["workspace_id"],
                 "pane_id": pane["pane_id"],
                 "status": pane["status"],
                 "label": item["panes"].get(pane["pane_id"], pane["current_label"]),
@@ -1225,6 +1242,7 @@ def sidebar_preview_data(names, rows):
                     f"{pane['agent']} · {plain_workspace_name(item['workspace'])}"
                 ),
             })
+        previous_group = row["group_key"]
     return {"spaces": spaces, "agents": agents}
 
 
@@ -1241,15 +1259,29 @@ def print_sidebar_preview(names, rows):
             text += " " * (width - display_width(text))
         return f"\033[1m{text}\033[0m" if bold and use_bold else text
 
-    spaces = [("spaces", True), ("", False)]
-    for item in preview["spaces"]:
-        spaces.append((f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}", True))
-        if item["context"]:
-            spaces.append((f"  {item['context']}", False))
-    agents = [("agents", True), ("", False)]
+    agents_by_workspace = {}
     for item in preview["agents"]:
-        agents.append((f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}", True))
-        agents.append((f"  {item['context']}", False))
+        if item.get("separator"):
+            continue
+        agents_by_workspace.setdefault(item["workspace_id"], []).extend([
+            (f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}", True),
+            (f"  {item['context']}", False),
+        ])
+
+    spaces = [("spaces", True), ("", False)]
+    agents = [("agents", True), ("", False)]
+    for item in preview["spaces"]:
+        if item.get("separator"):
+            spaces.append(("", False))
+            agents.append(("", False))
+            continue
+        left = [(f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}", True)]
+        if item["context"]:
+            left.append((f"  {item['context']}", False))
+        right = agents_by_workspace.get(item["workspace_id"], [])
+        block_size = max(len(left), len(right))
+        spaces.extend(left + [("", False)] * (block_size - len(left)))
+        agents.extend(right + [("", False)] * (block_size - len(right)))
 
     title = "Herdr Sidebar Preview"
     print(f"\033[1m{title}\033[0m" if use_bold else title)

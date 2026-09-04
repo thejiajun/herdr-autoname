@@ -155,6 +155,8 @@ Haiku、low-effort 和 JSON Schema，不会创建可恢复会话或调用工具�
 每次命名或运行 `herdr-autoname configure` 时，还会按当前项目稳定分组 Workspace。
 同一项目保持连续，组内维持原顺序。SSH Pane 会根据终端标题识别远程主机，Sidebar
 第二行改为 `SSH · 主机名`，不会继续显示切换前的本地目录和 Git 分支。
+每个项目组只在第一个 Workspace 显示项目、分支和 Git 状态，组间在预览中留出空行。
+Pane 名称使用“动词 + 对象”，不生成重复、含糊的“把……好”句式。
 
 ## 输出
 
