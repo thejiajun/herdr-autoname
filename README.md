@@ -63,43 +63,30 @@ pipx install git+https://github.com/thejiajun/herdr-autoname.git
 herdr-autoname provider
 ```
 
-### Pika Chat API
+### 可用 Provider
 
-创建 `~/.config/herdr/autoname.env`：
+实测 23 个 Workspace 一轮命名：
 
-```dotenv
-PIKA_CHAT_API_KEY=your_key
-HERDR_AUTONAME_PROVIDER=pika
-```
+| Provider | 类型 | 耗时 | 成本 | 凭证 |
+|---|---|---|---|---|
+| pika | HTTP | 5.9s | $0.0057 | `PIKA_CHAT_API_KEY` |
+| openrouter | HTTP | 6.8s | $0.0058 | `OPENROUTER_API_KEY`，没有则借用 pi 的 OAuth token |
+| deepseek | HTTP | — | — | `DEEPSEEK_API_KEY` |
+| pi | CLI | 5.3s | — | `pi auth`（任一 provider 就绪即可） |
+| claude | CLI | 10.7s | $0.0185 | `claude` 已登录 |
+| codex | CLI | — | — | `codex login` |
+| gemini | CLI | 44.5s | — | `gemini` OAuth 或 `GEMINI_API_KEY` |
+| cursor | CLI | 52.8s | — | `cursor-agent` 已登录 |
 
-### DeepSeek API
+HTTP Provider 只需要 base URL、模型名和鉴权头，任何 OpenAI 兼容端点都能接进来。
+Agent CLI 每次都要启动完整会话，所以只适合当没有 API Key 时的兜底；调用时统一关掉
+工具、会话保存、skill、MCP 和扩展，并把系统提示直接替换成命名提示——Claude CLI
+一轮的上下文因此从 28k 降到 8k token。Pane 对话一律走 stdin，不进进程列表。
 
-```dotenv
-DEEPSEEK_API_KEY=your_key
-HERDR_AUTONAME_PROVIDER=deepseek
-HERDR_AUTONAME_MODEL=deepseek-chat
-```
+### 凭证放哪
 
-### Codex CLI
-
-先确保 `codex` 已登录，然后运行：
-
-```bash
-herdr-autoname provider codex
-```
-
-### Claude CLI
-
-先确保 `claude` 已登录，然后运行：
-
-```bash
-herdr-autoname provider claude
-```
-
-Claude 默认使用 Haiku；临时指定模型可运行
-`herdr-autoname --provider claude --model sonnet`。
-
-API Key 也可以放在当前目录的 `.env`，或直接导出为环境变量。密钥不会出现在命令参数和输出中。
+Pika / DeepSeek / OpenRouter 的 Key 写进 `~/.config/herdr/autoname.env`、当前目录的
+`.env`，或导出为环境变量。密钥不会出现在命令参数和输出中。
 
 ## 使用
 

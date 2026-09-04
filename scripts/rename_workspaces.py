@@ -64,13 +64,33 @@ STATUS_ICONS = {
     "done": "✓",
     "unknown": "·",
 }
-PROVIDERS = ("auto", "pika", "deepseek", "codex", "claude")
+OPENROUTER_BASE = "https://openrouter.ai/api"
+OPENROUTER_MODEL = "google/gemini-3.7-flash"
+# An OpenAI-compatible endpoint needs no request code of its own: a base URL,
+# a model and the shape of its auth header are the whole adapter.
+HTTP_PROVIDERS = {
+    "pika": {"label": "Pika Chat API", "base": PIKA_BASE, "model": PIKA_MODEL,
+             "key_env": "PIKA_CHAT_API_KEY", "auth": "x-api-key"},
+    "openrouter": {"label": "OpenRouter", "base": OPENROUTER_BASE, "model": OPENROUTER_MODEL,
+                   "key_env": "OPENROUTER_API_KEY", "auth": "bearer"},
+    "deepseek": {"label": "DeepSeek API", "base": DIRECT_BASE, "model": DIRECT_MODEL,
+                 "key_env": "DEEPSEEK_API_KEY", "auth": "bearer"},
+}
+CLI_DEFAULT_MODEL = "CLI default"
+# Every agent CLI can answer this, but each spawns a whole agent session, so
+# they are ordered by how little of that session they insist on carrying.
+CLI_PROVIDERS = {
+    "pi": {"label": "Pi CLI", "executable": "pi", "model": OPENROUTER_MODEL},
+    "claude": {"label": "Claude CLI", "executable": "claude", "model": "sonnet"},
+    "codex": {"label": "Codex CLI", "executable": "codex", "model": CLI_DEFAULT_MODEL},
+    "gemini": {"label": "Gemini CLI", "executable": "gemini", "model": CLI_DEFAULT_MODEL},
+    "cursor": {"label": "Cursor CLI", "executable": "cursor-agent", "model": CLI_DEFAULT_MODEL},
+}
+PROVIDERS = ("auto", *HTTP_PROVIDERS, *CLI_PROVIDERS)
 PROVIDER_LABELS = {
     "auto": "自动选择",
-    "pika": "Pika Chat API",
-    "deepseek": "DeepSeek API",
-    "codex": "Codex CLI",
-    "claude": "Claude CLI",
+    **{name: spec["label"] for name, spec in HTTP_PROVIDERS.items()},
+    **{name: spec["label"] for name, spec in CLI_PROVIDERS.items()},
 }
 HERDR_CONFIG = os.path.expanduser("~/.config/herdr/config.toml")
 SIDEBAR_ROWS = {
@@ -697,13 +717,52 @@ def log_command(value, as_json=False):
     return 0
 
 
+_BORROWED_KEYS = {}
+
+
+def openrouter_key(env_file):
+    """Fall back to the OpenRouter token pi already holds, so one login serves both."""
+    key = env_value("OPENROUTER_API_KEY", env_file)
+    if key:
+        return key
+    if "openrouter" not in _BORROWED_KEYS:
+        borrowed = ""
+        if shutil.which("pi"):
+            code, stdout, _ = run(
+                ["pi", "auth", "print-bearer-token", "--provider", "openrouter"], timeout=20
+            )
+            borrowed = stdout.strip() if code == 0 else ""
+        _BORROWED_KEYS["openrouter"] = borrowed
+    return _BORROWED_KEYS["openrouter"]
+
+
+def http_provider_key(provider, env_file):
+    if provider == "openrouter":
+        return openrouter_key(env_file)
+    return env_value(HTTP_PROVIDERS[provider]["key_env"], env_file)
+
+
 def local_cli_authenticated(provider):
-    executable = shutil.which(provider)
+    executable = shutil.which(CLI_PROVIDERS[provider]["executable"])
     if not executable:
         return False
     if provider == "codex":
         code, stdout, stderr = run([executable, "login", "status"], timeout=10)
         return code == 0 and "logged in" in f"{stdout}\n{stderr}".lower()
+    if provider == "cursor":
+        code, stdout, _ = run([executable, "status"], timeout=15)
+        return code == 0 and "logged in" in stdout.lower()
+    if provider == "gemini":
+        return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")) or any(
+            os.path.exists(os.path.expanduser(f"~/.gemini/{name}"))
+            for name in ("google_accounts.json", "oauth_creds.json")
+        )
+    if provider == "pi":
+        return any(
+            run([executable, "auth", "check", "--provider", name, "--json"], timeout=15)[1]
+            .find('"status":"ready"') >= 0
+            for name in ("openrouter", "anthropic", "google", "openai")
+        )
     code, stdout, _ = run([executable, "auth", "status", "--json"], timeout=10)
     if code != 0:
         return False
@@ -715,10 +774,8 @@ def local_cli_authenticated(provider):
 
 def provider_availability(args):
     return {
-        "pika": bool(env_value("PIKA_CHAT_API_KEY", args.env_file)),
-        "deepseek": bool(env_value("DEEPSEEK_API_KEY", args.env_file)),
-        "codex": local_cli_authenticated("codex"),
-        "claude": local_cli_authenticated("claude"),
+        **{name: bool(http_provider_key(name, args.env_file)) for name in HTTP_PROVIDERS},
+        **{name: local_cli_authenticated(name) for name in CLI_PROVIDERS},
     }
 
 
@@ -727,7 +784,7 @@ def resolve_provider(args, available=None):
     if requested != "auto":
         return requested
     available = available or provider_availability(args)
-    return next((name for name in ("pika", "deepseek", "codex", "claude") if available[name]), None)
+    return next((name for name in PROVIDERS[1:] if available[name]), None)
 
 
 def provider_command(value, args):
@@ -789,7 +846,7 @@ def initialize_provider(args):
 def print_provider_detection(config, available, initialized=None):
     local = "  ".join(
         f"{'✓' if available[name] else '✕'} {PROVIDER_LABELS[name]}"
-        for name in ("codex", "claude")
+        for name in CLI_PROVIDERS
     )
     if initialized:
         detected = ", ".join(
@@ -806,48 +863,43 @@ def provider_config(args):
     provider = resolve_provider(args)
     if not provider:
         raise RuntimeError(
-            "没有可用 Provider：请配置 PIKA_CHAT_API_KEY / DEEPSEEK_API_KEY，"
-            "或安装并登录 codex / claude CLI"
+            "没有可用 Provider：请配置 "
+            + " / ".join(spec["key_env"] for spec in HTTP_PROVIDERS.values())
+            + "，或安装并登录 " + " / ".join(CLI_PROVIDERS) + " CLI"
         )
     requested_model = args.model or saved_model()
-    if provider == "deepseek":
-        direct_key = env_value("DEEPSEEK_API_KEY", args.env_file)
-        if not direct_key:
-            raise RuntimeError("Provider deepseek 需要 DEEPSEEK_API_KEY")
+    if provider in HTTP_PROVIDERS:
+        spec = HTTP_PROVIDERS[provider]
+        key = http_provider_key(provider, args.env_file)
+        if not key:
+            raise RuntimeError(f"Provider {provider} 需要 {spec['key_env']}")
+        if provider == "deepseek":
+            model = requested_model if requested_model in ("deepseek-chat", "deepseek-reasoner") else spec["model"]
+        elif provider == "pika":
+            model = requested_model or spec["model"]
+        else:
+            model = args.model or spec["model"]
+        base = args.base_url or spec["base"]
+        if provider == "pika":
+            base = args.base_url or os.environ.get("PIKA_API_BASE", spec["base"])
         return {
             "kind": "http",
-            "base": args.base_url or DIRECT_BASE,
-            "model": requested_model if requested_model in ("deepseek-chat", "deepseek-reasoner") else DIRECT_MODEL,
-            "headers": {"Authorization": f"Bearer {direct_key}"},
-            "provider": "DeepSeek API",
+            "base": base,
+            "model": model,
+            "headers": ({"X-API-Key": key} if spec["auth"] == "x-api-key"
+                        else {"Authorization": f"Bearer {key}"}),
+            "provider": spec["label"],
         }
-    if provider == "pika":
-        pika_key = env_value("PIKA_CHAT_API_KEY", args.env_file)
-        if not pika_key:
-            raise RuntimeError("Provider pika 需要 PIKA_CHAT_API_KEY")
-        return {
-            "kind": "http",
-            "base": args.base_url or os.environ.get("PIKA_API_BASE", PIKA_BASE),
-            "model": requested_model or PIKA_MODEL,
-            "headers": {"X-API-Key": pika_key},
-            "provider": "Pika Chat API",
-        }
-    if provider == "codex":
-        if not shutil.which("codex"):
-            raise RuntimeError("找不到 codex CLI，请先安装并登录")
-        return {
-            "kind": "codex",
-            "model": args.model or "CLI default",
-            "provider": "Codex CLI",
-        }
-    if not shutil.which("claude"):
-        raise RuntimeError("找不到 claude CLI，请先安装并登录")
+    spec = CLI_PROVIDERS[provider]
+    if not shutil.which(spec["executable"]):
+        raise RuntimeError(f"找不到 {spec['executable']} CLI，请先安装并登录")
     return {
-        "kind": "claude",
-        # Haiku ignores --effort here and spends thousands of thinking tokens
-        # on this task; Sonnet answers it directly and costs less doing so.
-        "model": args.model or "sonnet",
-        "provider": "Claude CLI",
+        "kind": "cli",
+        "cli": provider,
+        # Haiku ignores --effort here and spends thousands of thinking tokens on
+        # this task; Sonnet answers it directly and costs less doing so.
+        "model": args.model or spec["model"],
+        "provider": spec["label"],
     }
 
 
@@ -1120,32 +1172,74 @@ def cli_failure_reason(proc):
     return "\n".join(dict.fromkeys(errors))[:400] if errors else output[-400:]
 
 
-def request_cli_batch(rows, config, record):
-    compact_input = json.dumps(
-        naming_payload(rows), ensure_ascii=False, separators=(",", ":")
-    )
-    prompt = SYSTEM_PROMPT + "\n\n输入：\n" + compact_input
-    record["request_json"] = compact_input
-    if config["kind"] == "codex":
+def cli_invocation(provider, model, payload):
+    """The leanest one-shot form each CLI supports: no tools, sessions or skills.
+
+    The payload rides on stdin wherever the CLI allows it, so pane conversation
+    never lands in a process listing.
+    """
+    schema = json.dumps(naming_schema(), separators=(",", ":"))
+    if provider == "claude":
+        return [
+            "claude", "-p", "--safe-mode", "--model", model, "--effort", "low",
+            "--output-format", "json", "--no-session-persistence",
+            "--permission-mode", "dontAsk", "--tools", "",
+            # Skills, MCP servers and per-machine context are dead weight for a
+            # naming call; replacing the coding-assistant prompt cuts the
+            # context from 28k to 8k tokens on a full run.
+            "--disable-slash-commands", "--strict-mcp-config", "--no-chrome",
+            "--exclude-dynamic-system-prompt-sections",
+            "--system-prompt", SYSTEM_PROMPT, "--json-schema", schema,
+        ], payload
+    if provider == "codex":
         command = [
             "codex", "exec", "--skip-git-repo-check", "--ephemeral",
             "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only",
             "--color", "never", "-c", 'model_reasoning_effort="low"',
         ]
-        if config["model"] != "CLI default":
-            command.extend(["--model", config["model"]])
+        if model != CLI_DEFAULT_MODEL:
+            command.extend(["--model", model])
         command.append("-")
-    else:
-        command = [
-            "claude", "-p", "--safe-mode", "--model", config["model"],
-            "--effort", "low", "--output-format", "json",
-            "--no-session-persistence", "--permission-mode", "dontAsk",
-            "--tools", "", "--json-schema",
-            json.dumps(naming_schema(), separators=(",", ":")),
-        ]
+        return command, SYSTEM_PROMPT + "\n\n输入：\n" + payload
+    if provider == "pi":
+        command = ["pi", "-p", "--no-tools", "--no-session", "--no-extensions",
+                   "--system-prompt", SYSTEM_PROMPT]
+        if model != CLI_DEFAULT_MODEL:
+            command.extend(["--model", model])
+        return command, payload
+    if provider == "gemini":
+        command = ["gemini", "--skip-trust", "--approval-mode", "plan"]
+        if model != CLI_DEFAULT_MODEL:
+            command.extend(["--model", model])
+        # gemini appends -p after stdin, so the instructions land last.
+        command.extend(["-p", SYSTEM_PROMPT])
+        return command, "输入：\n" + payload
+    command = ["cursor-agent", "-p", "--trust", "--output-format", "text"]
+    if model != CLI_DEFAULT_MODEL:
+        command.extend(["--model", model])
+    return command, SYSTEM_PROMPT + "\n\n输入：\n" + payload
+
+
+def cli_failure_reason(proc):
+    """A CLI banner echoes the whole prompt; the real cause sits at the tail."""
+    output = (proc.stderr or proc.stdout).strip()
+    errors = [
+        line.strip() for line in output.splitlines()
+        if re.match(r"\s*(ERROR\b|error:)", line, re.I)
+    ]
+    return "\n".join(dict.fromkeys(errors))[:400] if errors else output[-400:]
+
+
+def request_cli_batch(rows, config, record):
+    payload = json.dumps(
+        naming_payload(rows), ensure_ascii=False, separators=(",", ":")
+    )
+    provider = config["cli"]
+    command, stdin_text = cli_invocation(provider, config["model"], payload)
+    record["request_json"] = payload
     try:
         proc = subprocess.run(
-            command, input=prompt, capture_output=True, text=True,
+            command, input=stdin_text, capture_output=True, text=True,
             timeout=250, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -1156,35 +1250,30 @@ def request_cli_batch(rows, config, record):
         failure = RuntimeError if QUOTA_ERROR.search(reason) else TransientLLMError
         raise failure(f"{config['provider']} 请求失败：{reason}")
     usage = {
-        "request_bytes": len(prompt.encode("utf-8")),
+        "request_bytes": len(stdin_text.encode("utf-8")),
         "response_bytes": len(proc.stdout.encode("utf-8")),
     }
-    if config["kind"] == "codex":
+    text = proc.stdout
+    if provider == "claude":
+        try:
+            payload_json = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise TransientLLMError("Claude CLI 返回了无效 JSON") from exc
+        text = payload_json.get("result") or ""
+        cli_usage = payload_json.get("usage") or {}
+        usage.update({
+            key: value for key, value in cli_usage.items() if isinstance(value, (int, float))
+        })
+        if isinstance(payload_json.get("total_cost_usd"), (int, float)):
+            usage["cost"] = payload_json["total_cost_usd"]
+    elif provider == "codex":
         token_match = re.search(r"tokens used\s*\n([\d,]+)", proc.stderr, re.I)
         if token_match:
             usage["total_tokens"] = int(token_match.group(1).replace(",", ""))
-        try:
-            return extract_json(proc.stdout), usage
-        except RuntimeError as exc:
-            raise TransientLLMError(str(exc)) from exc
-
     try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Claude CLI 返回了无效 JSON") from exc
-    claude_usage = payload.get("usage") or {}
-    usage.update(claude_usage)
-    usage["total_tokens"] = sum(
-        claude_usage.get(key, 0)
-        for key in (
-            "input_tokens", "cache_creation_input_tokens",
-            "cache_read_input_tokens", "output_tokens",
-        )
-    )
-    usage["cost"] = payload.get("total_cost_usd", 0)
-    structured = payload.get("structured_output")
-    result = structured if isinstance(structured, dict) else extract_json(payload.get("result", ""))
-    return result, usage
+        return extract_json(text), usage
+    except RuntimeError as exc:
+        raise TransientLLMError(str(exc)) from exc
 
 
 def request_name_batch(rows, config):
@@ -1227,12 +1316,14 @@ def merge_usage(items):
     return merged
 
 
+def workspaces_per_request(config):
+    if config["model"].startswith("deepseek"):
+        return DEEPSEEK_WORKSPACES_PER_REQUEST
+    return DEFAULT_WORKSPACES_PER_REQUEST
+
+
 def request_names(rows, config):
-    batch_size = (
-        DEEPSEEK_WORKSPACES_PER_REQUEST
-        if config["model"].startswith("deepseek/")
-        else DEFAULT_WORKSPACES_PER_REQUEST
-    )
+    batch_size = workspaces_per_request(config)
     batches = [
         rows[index:index + batch_size]
         for index in range(0, len(rows), batch_size)
@@ -1832,7 +1923,7 @@ def main():
     options.add_argument("--model", metavar="模型ID", help="仅本次运行临时覆盖 LLM 模型")
     options.add_argument(
         "--provider", choices=PROVIDERS, metavar="名称",
-        help="仅本次使用 auto/pika/deepseek/codex/claude",
+        help="仅本次使用 " + "/".join(PROVIDERS),
     )
     options.add_argument("--json", action="store_true", help="输出机器可读的 JSON")
     options.add_argument("--verbose", action="store_true", help="预览时额外显示 Tab 和 Pane 详情")
@@ -1901,11 +1992,7 @@ def main():
             file=sys.stderr,
             flush=True,
         )
-    batch_size = (
-        DEEPSEEK_WORKSPACES_PER_REQUEST
-        if config["model"].startswith("deepseek/")
-        else DEFAULT_WORKSPACES_PER_REQUEST
-    )
+    batch_size = workspaces_per_request(config)
     request_count = (len(rows) + batch_size - 1) // batch_size
     started_at = time.monotonic()
     print(
