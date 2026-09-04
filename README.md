@@ -141,6 +141,13 @@ herdr-autoname --help
 会在交互式终端显示可选 Provider 菜单；在脚本或管道里则只输出状态，不等待输入。
 `provider auto` 可恢复动态选择。
 
+**Provider 只在设置时检测。** 每个本地 CLI 的登录检测都要起一个进程，串行跑完一轮
+要十几秒，这段等待原先卡在每次命名之前。现在只有 `herdr-autoname provider` 和首次
+自动选择才真正检测（并行执行，约 1 秒），结果缓存在
+`~/.local/share/herdr-autoname/providers.json`；已经选定 Provider 的命名运行直接读
+缓存，零进程开销，启动行标注「上次检测」。新装或新登录一个 CLI 后，跑一次
+`herdr-autoname provider` 刷新缓存即可。
+
 `provider <name>` 会将选择持久保存到同一配置文件。
 Codex 使用 ephemeral、read-only、low-effort 无头请求；Claude 使用 safe mode、
 Haiku、low-effort 和 JSON Schema，不会创建可恢复会话或调用工具。

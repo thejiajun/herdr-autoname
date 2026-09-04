@@ -45,6 +45,7 @@ PANE_MAX_DISPLAY_WIDTH = 28
 DEEPSEEK_WORKSPACES_PER_REQUEST = 3
 DEFAULT_WORKSPACES_PER_REQUEST = 30
 REQUEST_LOG_DB = os.path.expanduser("~/.local/share/herdr-autoname/requests.db")
+PROVIDER_CACHE = os.path.expanduser("~/.local/share/herdr-autoname/providers.json")
 REQUEST_LOG_KEEP = 200
 LLM_MAX_ATTEMPTS = 3
 LLM_RETRY_BACKOFF = 1.5
@@ -850,8 +851,17 @@ def local_cli_authenticated(provider):
     if provider == "grok":
         if os.environ.get("XAI_API_KEY"):
             return True
-        code, stdout, stderr = run([executable, "-p", "ping", "--tools", ""], timeout=20)
-        return code == 0 and "not signed in" not in f"{stdout}\n{stderr}".lower()
+        # A `grok -p ping` probe bills a real turn and takes 11 seconds; the CLI
+        # writes one session entry per issuer here once the login succeeds.
+        try:
+            with open(os.path.expanduser("~/.grok/auth.json"), encoding="utf-8") as handle:
+                sessions = json.load(handle)
+        except (OSError, ValueError):
+            return False
+        return any(
+            isinstance(session, dict) and session.get("key")
+            for session in sessions.values()
+        )
     code, stdout, _ = run([executable, "auth", "status", "--json"], timeout=10)
     if code != 0:
         return False
@@ -861,11 +871,41 @@ def local_cli_authenticated(provider):
         return False
 
 
+def cached_availability():
+    """Last probe result, so a naming run never pays for CLI login checks."""
+    try:
+        with open(PROVIDER_CACHE, encoding="utf-8") as handle:
+            available = json.load(handle).get("available")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(available, dict) or set(available) != set(PROVIDERS[1:]):
+        return None
+    return available
+
+
 def provider_availability(args):
-    return {
+    """Probe every provider, in parallel: the CLI login checks are seconds each.
+
+    Only the settings paths call this. A run with a provider already chosen
+    reads the cache instead, so login checks never sit in front of naming.
+    """
+    names = list(CLI_PROVIDERS)
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        probed = list(pool.map(local_cli_authenticated, names))
+    available = {
         **{name: bool(http_provider_key(name, args.env_file)) for name in HTTP_PROVIDERS},
-        **{name: local_cli_authenticated(name) for name in CLI_PROVIDERS},
+        **dict(zip(names, probed)),
     }
+    try:
+        os.makedirs(os.path.dirname(PROVIDER_CACHE), exist_ok=True)
+        with open(PROVIDER_CACHE, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"checked_at": time.strftime("%Y-%m-%d %H:%M:%S"), "available": available},
+                handle,
+            )
+    except OSError:
+        pass  # A missing cache only costs the next run its provider line.
+    return available
 
 
 def resolve_provider(args, available=None):
@@ -923,7 +963,7 @@ def provider_command(value, args):
 
 def initialize_provider(args):
     if args.provider or env_value("HERDR_AUTONAME_PROVIDER", AUTONAME_ENV):
-        return None, provider_availability(args)
+        return None, cached_availability()
     available = provider_availability(args)
     selected = resolve_provider(args, available)
     if not selected:
@@ -933,11 +973,7 @@ def initialize_provider(args):
 
 
 def print_provider_detection(config, available, initialized=None):
-    local = "  ".join(
-        f"{'✓' if available[name] else '✕'} {PROVIDER_LABELS[name]}"
-        for name in CLI_PROVIDERS
-    )
-    if initialized:
+    if initialized and available:
         detected = ", ".join(
             PROVIDER_LABELS[name] for name in PROVIDERS[1:] if available[name]
         )
@@ -945,7 +981,14 @@ def print_provider_detection(config, available, initialized=None):
             f"首次运行：检测到 {detected}；已自动选择 {PROVIDER_LABELS[initialized]}。",
             file=sys.stderr,
         )
-    print(f"Provider：{config['provider']}  |  本地无头：{local}", file=sys.stderr)
+    line = f"Provider：{config['provider']}"
+    if available:
+        local = "  ".join(
+            f"{'✓' if available.get(name) else '✕'} {PROVIDER_LABELS[name]}"
+            for name in CLI_PROVIDERS
+        )
+        line += f"  |  本地无头：{local}（上次检测）"
+    print(line, file=sys.stderr)
 
 
 def provider_config(args):
