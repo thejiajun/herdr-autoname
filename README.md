@@ -11,7 +11,7 @@
 - 自动配置 Herdr Sidebar 的标题、项目路径、Git 分支和状态
 - 将同一项目的 Workspace 连续排列；SSH 会话按远程主机分组
 - SSH 会话显示 `SSH · 主机名`，不沿用切换前的本地项目目录
-- `--dry-run` 无需 API Key，不调用模型、不修改名称，并按 Herdr Sidebar 样式预览结果
+- `--dry-run` 无需 API Key，不调用模型、不修改名称；宽终端用粗体双栏预览 Herdr Sidebar，窄终端自动改为上下排列
 - 仅依赖 Python 标准库
 
 ## 前提

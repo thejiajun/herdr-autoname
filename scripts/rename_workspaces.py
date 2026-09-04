@@ -1230,30 +1230,57 @@ def sidebar_preview_data(names, rows):
 
 def print_sidebar_preview(names, rows):
     preview = sidebar_preview_data(names, rows)
-    width = max(38, min(58, shutil.get_terminal_size((52, 40)).columns - 4))
+    terminal_width = shutil.get_terminal_size((100, 40)).columns
+    use_bold = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
-    def line(text=""):
+    def cell(text, width, bold=False):
         text = str(text).replace("\n", " ")
         if display_width(text) > width:
             text = fit_cell(text, width).rstrip()
         else:
             text += " " * (width - display_width(text))
-        print(f"│ {text} │")
+        return f"\033[1m{text}\033[0m" if bold and use_bold else text
 
-    title = " Herdr Sidebar Preview "
-    print("┌" + title + "─" * max(0, width + 2 - display_width(title)) + "┐")
-    line("spaces")
-    line()
+    spaces = [("spaces", True), ("", False)]
     for item in preview["spaces"]:
-        line(f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}")
+        spaces.append((f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}", True))
         if item["context"]:
-            line(f"  {item['context']}")
-    line()
-    line("agents" + " " * max(1, width - len("agents") - len("priority")) + "priority")
-    line()
+            spaces.append((f"  {item['context']}", False))
+    agents = [("agents", True), ("", False)]
     for item in preview["agents"]:
-        line(f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}")
-        line(f"  {item['context']}")
+        agents.append((f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}", True))
+        agents.append((f"  {item['context']}", False))
+
+    title = "Herdr Sidebar Preview"
+    print(f"\033[1m{title}\033[0m" if use_bold else title)
+    if terminal_width >= 82:
+        width = max(36, min(54, (terminal_width - 7) // 2))
+        print("┌" + "─" * (width + 2) + "┬" + "─" * (width + 2) + "┐")
+        count = max(len(spaces), len(agents))
+        for index in range(count):
+            left = spaces[index] if index < len(spaces) else ("", False)
+            right = agents[index] if index < len(agents) else ("", False)
+            if index == 0:
+                right = (
+                    "agents" + " " * max(1, width - len("agents") - len("priority")) + "priority",
+                    True,
+                )
+            print(
+                f"│ {cell(left[0], width, left[1])} │ "
+                f"{cell(right[0], width, right[1])} │"
+            )
+        print("└" + "─" * (width + 2) + "┴" + "─" * (width + 2) + "┘")
+        return
+
+    width = max(38, terminal_width - 4)
+    print("┌" + "─" * (width + 2) + "┐")
+    for section in (spaces, agents):
+        for index, (text, bold) in enumerate(section):
+            if section is agents and index == 0:
+                text = "agents" + " " * max(1, width - len("agents") - len("priority")) + "priority"
+            print(f"│ {cell(text, width, bold)} │")
+        if section is spaces:
+            print(f"│ {cell('', width)} │")
     print("└" + "─" * (width + 2) + "┘")
 
 
