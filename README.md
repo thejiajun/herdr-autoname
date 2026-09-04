@@ -95,7 +95,7 @@ Pika / DeepSeek / OpenRouter 的 Key 写进 `~/.config/herdr/autoname.env`、当
 herdr-autoname
 
 # 不调用模型、不修改名称，预览分组后的 Herdr Sidebar
-herdr-autoname --dry-run
+herdr-autoname -d              # 等同 --dry-run
 
 # 只查看当前会话状态
 herdr-autoname preview

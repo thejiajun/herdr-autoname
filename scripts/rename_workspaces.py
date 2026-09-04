@@ -1884,7 +1884,7 @@ def main():
         epilog=(
             "示例：\n"
             "  herdr-autoname                         调用模型并应用全部名称\n"
-            "  herdr-autoname --dry-run               不调用模型，只预览输出格式\n"
+            "  herdr-autoname -d                      不调用模型，只预览输出格式\n"
             "  herdr-autoname preview                 只查看当前会话，不调用模型\n"
             "  herdr-autoname configure               只修复侧边栏配置和 metadata\n"
             "  herdr-autoname provider                查看 Provider 和可用状态\n"
@@ -1913,7 +1913,7 @@ def main():
     options.add_argument("-h", "--help", action="help", help="显示此帮助信息并退出")
     mode = options.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true", help="应用生成的名称（默认行为）")
-    mode.add_argument("--dry-run", action="store_true", help="不调用模型、不写入，只预览输出格式")
+    mode.add_argument("-d", "--dry-run", action="store_true", help="不调用模型、不写入，只预览输出格式")
     options.add_argument(
         "--workspace", action="append", metavar="ID",
         help="只处理指定 Workspace ID；可重复传入",
