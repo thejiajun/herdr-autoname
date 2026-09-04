@@ -40,6 +40,7 @@ STATUS_ICONS = {
     "waiting": "◌",
     "error": "✕",
     "completed": "✓",
+    "done": "✓",
     "unknown": "·",
 }
 PROVIDERS = ("auto", "pika", "deepseek", "codex", "claude")
@@ -324,7 +325,50 @@ def compact_path(path):
     return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
 
 
-def remote_host(pane):
+def read_process_info(pane):
+    code, stdout, _ = run([
+        "herdr", "pane", "process-info", "--pane", pane["pane_id"]
+    ])
+    if code != 0:
+        return {}
+    try:
+        payload = json.loads(stdout)
+        return payload.get("result", {}).get("process_info", {})
+    except json.JSONDecodeError:
+        return {}
+
+
+def ssh_destination(argv):
+    options_with_values = {
+        "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J",
+        "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
+    }
+    skip_next = False
+    for argument in argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if argument in options_with_values:
+            skip_next = True
+            continue
+        if argument.startswith("-"):
+            continue
+        host = argument.rsplit("@", 1)[-1].strip("[]")
+        return host.split(":", 1)[0]
+    return ""
+
+
+def remote_host(pane, process_info=None):
+    process_info = process_info or {}
+    foreground_pid = process_info.get("foreground_process_group_id")
+    for process in process_info.get("foreground_processes", []):
+        if process.get("pid") != foreground_pid:
+            continue
+        argv = process.get("argv") or []
+        executable = os.path.basename(str(process.get("argv0") or process.get("name") or ""))
+        if executable == "ssh" and argv:
+            return ssh_destination(argv)
+
     title = pane.get("terminal_title_stripped", "")
     match = re.search(r"(?:^|\s)[^@\s]+@([^:\s]+):(?:~|/)", title)
     if not match:
@@ -339,10 +383,11 @@ def remote_host(pane):
     return "" if host in local_hosts else host
 
 
-def workspace_location(workspace_id, panes):
+def workspace_location(workspace_id, panes, process_infos=None):
+    process_infos = process_infos or {}
     host = ""
     for pane in panes:
-        host = remote_host(pane)
+        host = remote_host(pane, process_infos.get(pane["pane_id"]))
         if host:
             break
     if host:
@@ -386,10 +431,14 @@ def collect(only_workspaces=None):
     panes = [item for item in state.get("panes", []) if item["workspace_id"] in workspace_ids]
     with ThreadPoolExecutor(max_workers=min(12, max(1, len(panes)))) as pool:
         contents = dict(zip((p["pane_id"] for p in panes), pool.map(read_pane, panes)))
+    with ThreadPoolExecutor(max_workers=min(12, max(1, len(panes)))) as pool:
+        process_infos = dict(zip(
+            (p["pane_id"] for p in panes), pool.map(read_process_info, panes)
+        ))
     paths = {
         item.get("foreground_cwd") or item.get("cwd", "")
         for item in panes
-        if not remote_host(item)
+        if not remote_host(item, process_infos.get(item["pane_id"]))
     }
     paths.discard("")
     with ThreadPoolExecutor(max_workers=min(12, max(1, len(paths)))) as pool:
@@ -400,7 +449,7 @@ def collect(only_workspaces=None):
         workspace_id = workspace["workspace_id"]
         row_tabs = [item for item in tabs if item["workspace_id"] == workspace_id]
         row_panes = [item for item in panes if item["workspace_id"] == workspace_id]
-        location = workspace_location(workspace_id, row_panes)
+        location = workspace_location(workspace_id, row_panes, process_infos)
         primary_path = location["path"]
         rows.append({
             "workspace_id": workspace_id,
@@ -1111,9 +1160,7 @@ def sync_project_metadata(rows, names=None):
     for row in rows:
         workspace_name = renamed.get(row["workspace_id"], row["current_workspace"])
         workspace_name = workspace_name.strip().strip("[]").strip()
-        context = row["project"]
-        if context and not row["remote_host"] and row["git_status"] != "—":
-            context = f"{context} · {row['git_status']}"
+        context = sidebar_context(row)
         tokens = [f"workspace_label=[{workspace_name}]"]
         if context:
             tokens.append(f"context={context}")
@@ -1140,6 +1187,74 @@ def sync_project_metadata(rows, names=None):
                 pane_command.extend(["--clear-token", "workspace_plain"])
             run(pane_command)
     return updated
+
+
+def sidebar_context(row):
+    context = row["project"]
+    if context and not row["remote_host"] and row["git_status"] != "—":
+        context = f"{context} · {row['git_status']}"
+    return context
+
+
+def sidebar_preview_data(names, rows):
+    named = {item["workspace_id"]: item for item in names}
+    rows_by_id = {row["workspace_id"]: row for row in rows}
+    ordered_rows = [rows_by_id[item] for item in grouped_workspace_ids(rows)]
+    spaces = []
+    agents = []
+    status_rank = {
+        "working": 0, "waiting": 1, "error": 2, "idle": 3,
+        "completed": 4, "done": 4, "unknown": 5,
+    }
+    for row in ordered_rows:
+        item = named[row["workspace_id"]]
+        statuses = [pane["status"] for pane in row["panes"]] or ["unknown"]
+        status = min(statuses, key=lambda value: status_rank.get(value, 5))
+        spaces.append({
+            "workspace_id": row["workspace_id"],
+            "status": status,
+            "label": f"[{item['workspace'].strip().strip('[]').strip()}]",
+            "context": sidebar_context(row),
+        })
+        for pane in row["panes"]:
+            agents.append({
+                "pane_id": pane["pane_id"],
+                "status": pane["status"],
+                "label": item["panes"].get(pane["pane_id"], pane["current_label"]),
+                "context": (
+                    f"{pane['agent']} · {plain_workspace_name(item['workspace'])}"
+                ),
+            })
+    return {"spaces": spaces, "agents": agents}
+
+
+def print_sidebar_preview(names, rows):
+    preview = sidebar_preview_data(names, rows)
+    width = max(38, min(58, shutil.get_terminal_size((52, 40)).columns - 4))
+
+    def line(text=""):
+        text = str(text).replace("\n", " ")
+        if display_width(text) > width:
+            text = fit_cell(text, width).rstrip()
+        else:
+            text += " " * (width - display_width(text))
+        print(f"│ {text} │")
+
+    title = " Herdr Sidebar Preview "
+    print("┌" + title + "─" * max(0, width + 2 - display_width(title)) + "┐")
+    line("spaces")
+    line()
+    for item in preview["spaces"]:
+        line(f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}")
+        if item["context"]:
+            line(f"  {item['context']}")
+    line()
+    line("agents" + " " * max(1, width - len("agents") - len("priority")) + "priority")
+    line()
+    for item in preview["agents"]:
+        line(f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}")
+        line(f"  {item['context']}")
+    print("└" + "─" * (width + 2) + "┘")
 
 
 def print_result_table(names, rows, detailed=False):
@@ -1368,7 +1483,8 @@ def main():
     if not rows:
         raise RuntimeError("No Herdr workspaces found")
     print(f"找到 {len(rows)} 个 Workspace。", file=sys.stderr, flush=True)
-    print_session_preview(rows, detailed=args.verbose)
+    if not args.dry_run:
+        print_session_preview(rows, detailed=args.verbose)
     if args.command == "preview":
         if args.json:
             print(json.dumps({"mode": "preview", "workspaces": rows}, ensure_ascii=False, indent=2))
@@ -1379,14 +1495,18 @@ def main():
             "mode": "dry-run",
             "model_called": False,
             "names": names,
+            "sidebar_preview": sidebar_preview_data(names, rows),
             "mutations": [],
         }
         if args.json:
             print(json.dumps(output, ensure_ascii=False, indent=2))
         else:
             print("✓ Dry run：未调用模型，未修改任何名称。")
-            print("  以下使用当前名称预览最终输出格式：\n")
-            print_result_table(names, rows, detailed=args.verbose)
+            print("  以下按实际分组顺序预览 Herdr Sidebar：\n")
+            print_sidebar_preview(names, rows)
+            if args.verbose:
+                print("\n详细名称：")
+                print_result_table(names, rows, detailed=True)
         return 0
     if args.command in ("configure", "projects"):
         changed, updated = configure_sidebar(rows)
