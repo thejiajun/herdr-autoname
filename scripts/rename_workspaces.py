@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -53,7 +54,7 @@ HERDR_CONFIG = os.path.expanduser("~/.config/herdr/config.toml")
 SIDEBAR_ROWS = {
     "ui.sidebar.spaces": (
         'rows = [["state_icon", { token = "$workspace_label", bold = true }], '
-        '["$project", "branch", "git_status"]]'
+        '["$context"]]'
     ),
     "ui.sidebar.agents": (
         'rows = [["state_icon", { token = "pane", bold = true }], '
@@ -323,6 +324,50 @@ def compact_path(path):
     return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
 
 
+def remote_host(pane):
+    title = pane.get("terminal_title_stripped", "")
+    match = re.search(r"(?:^|\s)[^@\s]+@([^:\s]+):(?:~|/)", title)
+    if not match:
+        match = re.match(r"([A-Za-z0-9._-]+\.local):\s", title)
+    if not match:
+        return ""
+    host = match.group(1).lower().removesuffix(".local")
+    local_hosts = {
+        socket.gethostname().lower().removesuffix(".local"),
+        socket.getfqdn().lower().removesuffix(".local"),
+    }
+    return "" if host in local_hosts else host
+
+
+def workspace_location(workspace_id, panes):
+    host = ""
+    for pane in panes:
+        host = remote_host(pane)
+        if host:
+            break
+    if host:
+        return {
+            "path": f"ssh://{host}",
+            "project": f"SSH · {host}",
+            "group_key": f"remote:{host.lower()}",
+            "remote_host": host,
+        }
+    path = next((
+        pane.get("foreground_cwd") or pane.get("cwd", "")
+        for pane in panes
+        if pane.get("foreground_cwd") or pane.get("cwd")
+    ), "")
+    home = os.path.expanduser("~")
+    project = "" if not path or os.path.realpath(path) == os.path.realpath(home) else os.path.basename(path)
+    group_key = f"path:{os.path.realpath(path)}" if project else f"workspace:{workspace_id}"
+    return {
+        "path": path,
+        "project": project,
+        "group_key": group_key,
+        "remote_host": "",
+    }
+
+
 def collect(only_workspaces=None):
     state = snapshot()
     wanted = set(only_workspaces or [])
@@ -344,6 +389,7 @@ def collect(only_workspaces=None):
     paths = {
         item.get("foreground_cwd") or item.get("cwd", "")
         for item in panes
+        if not remote_host(item)
     }
     paths.discard("")
     with ThreadPoolExecutor(max_workers=min(12, max(1, len(paths)))) as pool:
@@ -354,16 +400,16 @@ def collect(only_workspaces=None):
         workspace_id = workspace["workspace_id"]
         row_tabs = [item for item in tabs if item["workspace_id"] == workspace_id]
         row_panes = [item for item in panes if item["workspace_id"] == workspace_id]
-        primary_path = next((
-            item.get("foreground_cwd") or item.get("cwd", "")
-            for item in row_panes
-            if item.get("foreground_cwd") or item.get("cwd")
-        ), "")
+        location = workspace_location(workspace_id, row_panes)
+        primary_path = location["path"]
         rows.append({
             "workspace_id": workspace_id,
             "current_workspace": workspace.get("label", ""),
             "path": primary_path,
-            "git_status": git_states.get(primary_path, "—"),
+            "git_status": "—" if location["remote_host"] else git_states.get(primary_path, "—"),
+            "project": location["project"],
+            "group_key": location["group_key"],
+            "remote_host": location["remote_host"],
             "tabs": [
                 {"tab_id": item["tab_id"], "current_label": item.get("label", "")}
                 for item in row_tabs
@@ -373,9 +419,7 @@ def collect(only_workspaces=None):
                     "pane_id": item["pane_id"],
                     "current_label": item.get("label", ""),
                     "agent": item.get("agent", "shell"),
-                    "project": os.path.basename(
-                        item.get("foreground_cwd") or item.get("cwd", "")
-                    ),
+                    "project": location["project"],
                     "status": item.get("agent_status", "unknown"),
                     "cwd": item.get("foreground_cwd") or item.get("cwd", ""),
                     "terminal_title": item.get("terminal_title_stripped", ""),
@@ -922,6 +966,56 @@ def current_workspace_ids():
     return {item["workspace_id"] for item in payload.get("workspaces", [])}
 
 
+def herdr_socket_request(method, params):
+    socket_path = os.environ.get(
+        "HERDR_SOCKET_PATH", os.path.expanduser("~/.config/herdr/herdr.sock")
+    )
+    request_id = f"herdr-autoname:{time.time_ns()}"
+    request = json.dumps(
+        {"id": request_id, "method": method, "params": params},
+        separators=(",", ":"),
+    ) + "\n"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(10)
+            client.connect(socket_path)
+            client.sendall(request.encode("utf-8"))
+            response = client.makefile("r", encoding="utf-8").readline()
+    except OSError as exc:
+        raise RuntimeError(f"Herdr socket request failed: {exc}") from exc
+    if not response:
+        raise RuntimeError("Herdr socket returned no response")
+    payload = json.loads(response)
+    if payload.get("error"):
+        raise RuntimeError(f"Herdr socket error: {payload['error']}")
+    return payload.get("result", {})
+
+
+def grouped_workspace_ids(rows):
+    groups = {}
+    order = []
+    for row in rows:
+        key = row["group_key"]
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(row["workspace_id"])
+    return [workspace_id for key in order for workspace_id in groups[key]]
+
+
+def group_workspaces(rows):
+    current = result_of(run_json(["herdr", "workspace", "list"]), "workspace_list")
+    current_ids = [item["workspace_id"] for item in current.get("workspaces", [])]
+    row_ids = [row["workspace_id"] for row in rows]
+    if set(current_ids) != set(row_ids):
+        return False, row_ids
+    desired = grouped_workspace_ids(rows)
+    if desired == current_ids:
+        return False, desired
+    herdr_socket_request("workspace.move_block", {"workspace_ids": desired})
+    return True, desired
+
+
 def rename_if_live(kind, target_id, label, workspace_id):
     if workspace_id not in current_workspace_ids():
         return False, "workspace closed"
@@ -1015,19 +1109,20 @@ def sync_project_metadata(rows, names=None):
     renamed = {item["workspace_id"]: item["workspace"] for item in (names or [])}
     updated = 0
     for row in rows:
-        projects = [pane["project"] for pane in row["panes"] if pane["project"]]
         workspace_name = renamed.get(row["workspace_id"], row["current_workspace"])
         workspace_name = workspace_name.strip().strip("[]").strip()
-        tokens = [
-            f"workspace_label=[{workspace_name}]",
-            f"project={projects[0]}",
-        ] if projects else [f"workspace_label=[{workspace_name}]"]
+        context = row["project"]
+        if context and not row["remote_host"] and row["git_status"] != "—":
+            context = f"{context} · {row['git_status']}"
+        tokens = [f"workspace_label=[{workspace_name}]"]
+        if context:
+            tokens.append(f"context={context}")
         command = [
             "herdr", "workspace", "report-metadata", row["workspace_id"],
-            "--source", "herdr-autoname",
+            "--source", "herdr-autoname", "--clear-token", "project",
         ]
-        if not projects:
-            command.extend(["--clear-token", "project"])
+        if not context:
+            command.extend(["--clear-token", "context"])
         for token in tokens:
             command.extend(["--token", token])
         code, _, _ = run(command)
@@ -1295,9 +1390,11 @@ def main():
         return 0
     if args.command in ("configure", "projects"):
         changed, updated = configure_sidebar(rows)
+        grouped, _ = group_workspaces(rows)
         action = "已更新" if changed else "已确认"
         print(
-            f"✓ {action}侧边栏布局，并刷新 {updated} 个 Workspace 标签。",
+            f"✓ {action}侧边栏布局，刷新 {updated} 个 Workspace 标签"
+            f"，项目分组{'已更新' if grouped else '无需调整'}。",
             file=sys.stderr,
         )
         return 0
@@ -1329,6 +1426,7 @@ def main():
     print("正在写入 Workspace、Tab 和 Pane 名称...", file=sys.stderr, flush=True)
     mutations = apply_names(names)
     sync_project_metadata(rows, names)
+    grouped, workspace_order = group_workspaces(rows)
     after_ids = current_workspace_ids()
     output = {
         "mode": "apply" if do_apply else "dry-run",
@@ -1339,6 +1437,8 @@ def main():
         "usage": usage,
         "names": names,
         "mutations": mutations,
+        "workspace_grouped": grouped,
+        "workspace_order": workspace_order,
         "closed_during_run": sorted(before_ids - after_ids),
         "added_during_run": sorted(after_ids - before_ids),
     }
@@ -1354,6 +1454,7 @@ def main():
             f"\n✓ 已更新 {counts['workspace']} 个 Workspace · "
             f"{counts['tab']} 个 Tab · {counts['pane']} 个 Pane"
         )
+        print(f"  项目分组：{'已更新' if grouped else '无需调整'}")
         tokens = usage.get("total_tokens")
         cost = usage.get("cost")
         metrics = [config["model"], f"{elapsed:.2f}s", f"{request_count} 次请求"]

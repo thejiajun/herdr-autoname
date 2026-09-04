@@ -9,6 +9,8 @@
 - 通过 Pika Chat API、DeepSeek API、Codex CLI 或 Claude CLI 生成中文短名称
 - 在写入前校验 Workspace、Tab、Pane 数量和 Pane 显示宽度
 - 自动配置 Herdr Sidebar 的标题、项目路径、Git 分支和状态
+- 将同一项目的 Workspace 连续排列；SSH 会话按远程主机分组
+- SSH 会话显示 `SSH · 主机名`，不沿用切换前的本地项目目录
 - `--dry-run` 无需 API Key，不调用模型、不修改名称
 - 仅依赖 Python 标准库
 
@@ -149,6 +151,10 @@ herdr-autoname --help
 `provider <name>` 会将选择持久保存到同一配置文件。
 Codex 使用 ephemeral、read-only、low-effort 无头请求；Claude 使用 safe mode、
 Haiku、low-effort 和 JSON Schema，不会创建可恢复会话或调用工具。
+
+每次命名或运行 `herdr-autoname configure` 时，还会按当前项目稳定分组 Workspace。
+同一项目保持连续，组内维持原顺序。SSH Pane 会根据终端标题识别远程主机，Sidebar
+第二行改为 `SSH · 主机名`，不会继续显示切换前的本地目录和 Git 分支。
 
 ## 输出
 
