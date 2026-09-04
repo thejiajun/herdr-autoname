@@ -77,6 +77,7 @@ herdr-autoname provider
 | codex | CLI | — | — | `codex login` |
 | gemini | CLI | 44.5s | — | `gemini` OAuth 或 `GEMINI_API_KEY` |
 | cursor | CLI | 52.8s | — | `cursor-agent` 已登录 |
+| grok | CLI | — | — | `grok login` 或 `XAI_API_KEY` |
 
 HTTP Provider 只需要 base URL、模型名和鉴权头，任何 OpenAI 兼容端点都能接进来。
 Agent CLI 每次都要启动完整会话，所以只适合当没有 API Key 时的兜底；调用时统一关掉

@@ -85,6 +85,7 @@ CLI_PROVIDERS = {
     "codex": {"label": "Codex CLI", "executable": "codex", "model": CLI_DEFAULT_MODEL},
     "gemini": {"label": "Gemini CLI", "executable": "gemini", "model": CLI_DEFAULT_MODEL},
     "cursor": {"label": "Cursor CLI", "executable": "cursor-agent", "model": CLI_DEFAULT_MODEL},
+    "grok": {"label": "Grok CLI", "executable": "grok", "model": CLI_DEFAULT_MODEL},
 }
 PROVIDERS = ("auto", *HTTP_PROVIDERS, *CLI_PROVIDERS)
 PROVIDER_LABELS = {
@@ -846,6 +847,11 @@ def local_cli_authenticated(provider):
             .find('"status":"ready"') >= 0
             for name in ("openrouter", "anthropic", "google", "openai")
         )
+    if provider == "grok":
+        if os.environ.get("XAI_API_KEY"):
+            return True
+        code, stdout, stderr = run([executable, "-p", "ping", "--tools", ""], timeout=20)
+        return code == 0 and "not signed in" not in f"{stdout}\n{stderr}".lower()
     code, stdout, _ = run([executable, "auth", "status", "--json"], timeout=10)
     if code != 0:
         return False
@@ -1297,6 +1303,14 @@ def cli_invocation(provider, model, payload):
         # gemini appends -p after stdin, so the instructions land last.
         command.extend(["-p", SYSTEM_PROMPT])
         return command, "输入：\n" + payload
+    if provider == "grok":
+        command = ["grok", "--no-plan", "--no-subagents", "--tools", "",
+                   "--system-prompt-override", SYSTEM_PROMPT, "--json-schema", schema]
+        if model != CLI_DEFAULT_MODEL:
+            command.extend(["--model", model])
+        # grok takes the turn as the value of -p and reads no stdin.
+        command.extend(["-p", payload])
+        return command, None
     command = ["cursor-agent", "-p", "--trust", "--output-format", "text"]
     if model != CLI_DEFAULT_MODEL:
         command.extend(["--model", model])
@@ -1328,12 +1342,18 @@ def request_cli_batch(rows, config, record):
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise TransientLLMError(f"{config['provider']} 请求失败：{exc}") from exc
     record["response_text"] = proc.stdout
+    if proc.stdout.lstrip().startswith('{"type": "error"'):
+        try:
+            reason = json.loads(proc.stdout)["message"]
+        except (json.JSONDecodeError, KeyError):
+            reason = proc.stdout.strip()[:200]
+        raise RuntimeError(f"{config['provider']} 请求失败：{reason[:300]}")
     if proc.returncode != 0:
         reason = cli_failure_reason(proc)
         failure = RuntimeError if QUOTA_ERROR.search(reason) else TransientLLMError
         raise failure(f"{config['provider']} 请求失败：{reason}")
     usage = {
-        "request_bytes": len(stdin_text.encode("utf-8")),
+        "request_bytes": len((stdin_text or "").encode("utf-8")),
         "response_bytes": len(proc.stdout.encode("utf-8")),
     }
     text = proc.stdout
