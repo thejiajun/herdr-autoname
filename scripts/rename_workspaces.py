@@ -24,9 +24,24 @@ PIKA_BASE = "https://api.dev.pika.art"
 PIKA_MODEL = "google/gemini-3.7-flash"
 AUTONAME_ENV = os.path.expanduser("~/.config/herdr/autoname.env")
 MAX_PANE_CHARS = 1_200
+# Budgets per pane, measured against real sessions: the current ask earns the
+# most room, the previous one only frames it, and the reply only has to say
+# what is happening now.
+ASK_CHARS = 260
+PREV_CHARS = 90
+REPLY_CHARS = 130
+SCREEN_CHARS = 350
+INJECTED_TURN = re.compile(
+    r"^(<task-notification|<command-name|<command-message|<local-command|<system-reminder"
+    r"|Caveat:|Stop hook feedback|Continue if you have next steps"
+    r"|This session is being continued from a previous conversation"
+    r"|\[Request interrupted|\[Image:)", re.I)
+FRAME_LINE = re.compile(r"^[\s\u2502\u251c\u2514\u250c\u2510\u2518\u2500\u253c\u2524"
+                        r"\u258c\u2588\u2591\u254c\u256d\u256e\u2570\u256f=+|-]{12,}")
+CONFIG_DUMP = re.compile(r"^[\w.\-]+=[^\s]*$")
 PANE_MAX_DISPLAY_WIDTH = 24
 DEEPSEEK_WORKSPACES_PER_REQUEST = 3
-DEFAULT_WORKSPACES_PER_REQUEST = 20
+DEFAULT_WORKSPACES_PER_REQUEST = 30
 REQUEST_LOG_DB = os.path.expanduser("~/.local/share/herdr-autoname/requests.db")
 REQUEST_LOG_KEEP = 200
 LLM_MAX_ATTEMPTS = 3
@@ -118,32 +133,69 @@ def snapshot():
     return payload["snapshot"]
 
 
-def last_two_rounds(messages):
-    messages = [(role, text.strip()) for role, text in messages if text and text.strip()]
-    user_indexes = [index for index, (role, _) in enumerate(messages) if role == "user"]
-    if not user_indexes:
-        return ""
-    selected = [messages[index] for index in user_indexes[-2:]]
-    latest_user = user_indexes[-1]
-    latest_assistant = next(
-        (message for message in reversed(messages[latest_user + 1:]) if message[0] == "assistant"),
-        None,
-    )
-    if latest_assistant:
-        selected.append(latest_assistant)
-    limits = {"user": 240, "assistant": 170}
-    rendered = "\n".join(
-        f"{role.upper()}: {sanitize_content(text)[:limits[role]]}"
-        for role, text in selected
-    )
-    return rendered[-650:]
+def is_injected_turn(text):
+    """Hook output, task notifications and pasted frames are not user intent."""
+    text = re.sub(r"<system-reminder>.*?</system-reminder>", " ", text, flags=re.S).strip()
+    if not text or INJECTED_TURN.match(text) or FRAME_LINE.match(text):
+        return True
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if lines and sum(bool(CONFIG_DUMP.match(line)) for line in lines) / len(lines) > 0.5:
+        return True
+    letters = len(re.findall(r"[\w\u4e00-\u9fff]", text))
+    return letters < 4 or letters / len(text) < 0.35
+
+
+def condense(text, limit):
+    """Long pastes carry the ask at the end, so keep the tail and a head hint."""
+    text = re.sub(r"<system-reminder>.*?</system-reminder>", " ", text, flags=re.S)
+    text = re.sub(r"\s+", " ", sanitize_content(text)).strip()
+    if len(text) <= limit:
+        return text
+    head = max(0, limit // 3)
+    return f"{text[:head]} … {text[-(limit - head):]}".strip()
+
+
+def recent_signals(messages):
+    """The two asks that frame the current arc, plus what the agent just said."""
+    kept = [
+        (role, text) for role, text in messages
+        if text and text.strip() and not is_injected_turn(text)
+    ]
+    asks = [text for text in (condense(text, ASK_CHARS) for role, text in kept if role == "user") if text]
+    lines = []
+    if len(asks) > 1:
+        lines.append("PREV: " + asks[-2][:PREV_CHARS])
+    if asks:
+        lines.append("ASK: " + asks[-1])
+    reply = next((text for role, text in reversed(kept) if role == "assistant"), "")
+    if reply:
+        lines.append("DID: " + condense(reply, REPLY_CHARS))
+    return "\n".join(lines)
 
 
 def last_user_input(messages):
     for role, text in reversed(messages):
-        if role == "user" and text and text.strip():
-            return sanitize_content(text).replace("\n", " ")[:650]
+        if role != "user" or not text or not text.strip() or is_injected_turn(text):
+            continue
+        # A scrubbed command line condenses to nothing; keep looking back.
+        condensed = condense(text, 650)
+        if condensed:
+            return condensed
     return ""
+
+
+def compress_terminal(text):
+    """A screen frame is mostly chrome; keep the lines that carry words."""
+    kept = []
+    for line in sanitize_content(text).splitlines():
+        line = re.sub(r"[\u2588\u2591\u254c\u2500\u2502\u2503\u258c\u258f]{2,}", " ", line.strip())
+        line = re.sub(r"\s{2,}", " ", line).strip()
+        if not line or FRAME_LINE.match(line):
+            continue
+        letters = len(re.findall(r"[\w\u4e00-\u9fff]", line))
+        if letters >= 4 and letters / len(line) >= 0.4:
+            kept.append(line)
+    return "\n".join(kept[-10:])[-SCREEN_CHARS:]
 
 
 def opencode_messages(session_id):
@@ -246,7 +298,7 @@ def native_session_content(pane):
     else:
         return None
     return {
-        "recent_content": last_two_rounds(messages),
+        "recent_content": recent_signals(messages),
         "last_user_input": last_user_input(messages),
     }
 
@@ -264,13 +316,13 @@ def read_pane(pane):
             timeout=30,
         )
         if code == 0 and stdout:
-            content = sanitize_content(stdout)[-MAX_PANE_CHARS:]
+            content = compress_terminal(stdout[-MAX_PANE_CHARS:])
             matches = re.findall(
                 r"(?:^|\n)USER:\s*(.*?)(?=\n(?:USER|ASSISTANT):|\Z)", content, re.S
             )
             return {
                 "recent_content": content,
-                "last_user_input": matches[-1].replace("\n", " ")[:650] if matches else "",
+                "last_user_input": condense(matches[-1], 650) if matches else "",
             }
     return {"recent_content": "(no readable recent content)", "last_user_input": ""}
 

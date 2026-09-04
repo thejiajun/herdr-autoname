@@ -157,6 +157,19 @@ herdr-autoname --help
 Codex 使用 ephemeral、read-only、low-effort 无头请求；Claude 使用 safe mode、
 Haiku、low-effort 和 JSON Schema，不会创建可恢复会话或调用工具。
 
+## 会话信号提取
+
+喂给模型的不是整段终端内容，而是每个 Pane 的三行信号：上一句用户诉求（`PREV`）、
+当前用户诉求（`ASK`，完整保留）、Agent 最新一句回复（`DID`）。Agent 的思考过程、
+工具调用和工具结果都不进入输入。
+
+被过滤掉的「假用户消息」包括 hook 反馈、`<task-notification>`、slash command 包装、
+compact 摘要、粘贴的表格边框和 `key=value` 配置输出——实测这类内容占原先「用户消息」
+的 23%。长粘贴保留尾部，因为真正的诉求通常写在粘贴内容之后。没有 Agent 会话的
+shell Pane 走终端截屏压缩，去掉进度条和分隔线后只保留有字的行。
+
+实测 23 个 Workspace：输入从 4915 tokens 降到 3556，Pane 名称更贴近当前动作。
+
 ## 请求日志
 
 每次模型请求都会写入 `~/.local/share/herdr-autoname/requests.db`（SQLite，只保留
