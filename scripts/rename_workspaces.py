@@ -1040,7 +1040,7 @@ def extract_json(text):
         raise RuntimeError("LLM response did not contain JSON")
     match = re.search(r"\{.*\}", text, re.S)
     # Models drop a bracket often enough that repairing the nesting beats a
-    # retry; validate_names still rejects anything with the wrong shape.
+    # retry; validate_names still drops anything with the wrong shape.
     candidates = [match.group(0)] if match else []
     candidates.append(balance_brackets(text[start:]))
     for candidate in candidates:
@@ -1251,16 +1251,6 @@ def naming_schema():
     }
 
 
-def cli_failure_reason(proc):
-    """A CLI banner echoes the whole prompt; the real cause sits at the tail."""
-    output = (proc.stderr or proc.stdout).strip()
-    errors = [
-        line.strip() for line in output.splitlines()
-        if re.match(r"\s*(ERROR\b|error:)", line, re.I)
-    ]
-    return "\n".join(dict.fromkeys(errors))[:400] if errors else output[-400:]
-
-
 def cli_invocation(provider, model, payload):
     """The leanest one-shot form each CLI supports: no tools, sessions or skills.
 
@@ -1392,20 +1382,33 @@ def request_name_batch(rows, config):
         started_at = time.monotonic()
         try:
             if config["kind"] == "http":
-                result = request_http_batch(rows, config, attempt_record)
+                payload, usage = request_http_batch(rows, config, attempt_record)
             else:
-                result = request_cli_batch(rows, config, attempt_record)
+                payload, usage = request_cli_batch(rows, config, attempt_record)
+            names, failures = validate_names(payload, rows)
+            if failures and attempt < LLM_MAX_ATTEMPTS:
+                # A malformed item is a slip, not a stable answer: one more roll
+                # of the same batch fixes it more reliably than any repair.
+                raise TransientLLMError(failures[0]["reason"])
         except RuntimeError as exc:
             attempt_record["error"] = str(exc)
             attempt_record["elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
             row_id = log_request(attempt_record)
-            if not isinstance(exc, TransientLLMError) or attempt == LLM_MAX_ATTEMPTS:
+            if not isinstance(exc, TransientLLMError):
                 raise RuntimeError(log_hint(exc, row_id)) from exc
+            if attempt == LLM_MAX_ATTEMPTS:
+                # Give up on this batch alone so every other batch still lands.
+                reason = log_hint(exc, row_id)
+                return [], [skipped_workspace(row, reason) for row in rows], {}
             time.sleep(LLM_RETRY_BACKOFF * attempt)
             continue
         attempt_record["elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
-        log_request(attempt_record)
-        return result
+        if failures:
+            attempt_record["error"] = "；".join(item["reason"] for item in failures)
+        row_id = log_request(attempt_record)
+        for item in failures:
+            item["reason"] = log_hint(item["reason"], row_id)
+        return names, failures, usage
 
 
 def merge_usage(items):
@@ -1433,72 +1436,93 @@ def request_names(rows, config):
     ]
     with ThreadPoolExecutor(max_workers=min(4, len(batches))) as pool:
         results = list(pool.map(lambda batch: request_name_batch(batch, config), batches))
-    names = []
-    usage_items = []
-    for payload, usage in results:
-        batch_names = payload.get("n")
-        if not isinstance(batch_names, list):
-            raise RuntimeError("LLM JSON is missing the n list")
+    names, failures, usage_items = [], [], []
+    for batch_names, batch_failures, usage in results:
         names.extend(batch_names)
+        failures.extend(batch_failures)
         usage_items.append(usage)
-    return {"n": names}, merge_usage(usage_items), len(batches)
+    return names, failures, merge_usage(usage_items), len(batches)
+
+
+def name_list(value):
+    """Models sometimes send one name bare or keyed by id; both mean the same list."""
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, str):
+        return [value]
+    return value if isinstance(value, list) else []
+
+
+def normalize_item(item, row):
+    """Map one LLM item onto a row, or raise ValueError naming the mismatch."""
+    if isinstance(item, dict):
+        item = [
+            item.get("workspace", item.get("n")),
+            item.get("tabs", item.get("t")),
+            item.get("panes", item.get("p")),
+        ]
+    if isinstance(item, list) and len(item) == 2:
+        # A dropped list has exactly one place it can belong when the other
+        # level is empty; with both levels filled, guessing would misname them.
+        if not row["tabs"]:
+            item = [item[0], [], item[1]]
+        elif not row["panes"]:
+            item = [item[0], item[1], []]
+    if not isinstance(item, list) or len(item) != 3:
+        raise ValueError("条目不是 [workspace, tabs, panes] 三段结构")
+    workspace_name, tabs, panes = item
+    tabs, panes = name_list(tabs), name_list(panes)
+    if len(tabs) != len(row["tabs"]):
+        raise ValueError(f"返回 {len(tabs)} 个 Tab 名称，实际有 {len(row['tabs'])} 个")
+    if len(panes) != len(row["panes"]):
+        raise ValueError(f"返回 {len(panes)} 个 Pane 名称，实际有 {len(row['panes'])} 个")
+    names = [workspace_name, *tabs, *panes]
+    if any(not isinstance(name, str) or not name.strip() for name in names):
+        raise ValueError("返回了空名称")
+    oversized = [
+        name for name in panes
+        if display_width(name.strip()) > PANE_MAX_DISPLAY_WIDTH
+    ]
+    if oversized:
+        raise ValueError(f"Pane 名称过长：{oversized[0]}")
+    return {
+        "workspace_id": row["workspace_id"],
+        "workspace": workspace_name.strip(),
+        "tabs": {
+            tab["tab_id"]: name.strip()
+            for tab, name in zip(row["tabs"], tabs)
+        },
+        "panes": {
+            pane["pane_id"]: name.strip()
+            for pane, name in zip(row["panes"], panes)
+        },
+    }
+
+
+def skipped_workspace(row, reason):
+    return {"workspace_id": row["workspace_id"], "reason": str(reason)}
 
 
 def validate_names(raw, rows):
+    """Return the items that map cleanly onto rows, plus one entry per item that does not.
+
+    A batch-level mismatch loses the row alignment, so it is raised for a retry;
+    a single bad item only costs that one workspace its new name.
+    """
     suggestions = raw.get("n")
     if not isinstance(suggestions, list):
-        raise RuntimeError("LLM JSON is missing the n list")
+        raise TransientLLMError("LLM JSON is missing the n list")
     if len(suggestions) != len(rows):
-        raise RuntimeError("LLM returned the wrong workspace count; no names were applied")
-
-    normalized = []
+        raise TransientLLMError(
+            f"模型返回了 {len(suggestions)} 个 Workspace，实际请求 {len(rows)} 个"
+        )
+    normalized, failures = [], []
     for row, item in zip(rows, suggestions):
-        workspace_id = row["workspace_id"]
-        if isinstance(item, dict):
-            item = [
-                item.get("workspace", item.get("n")),
-                item.get("tabs", item.get("t")),
-                item.get("panes", item.get("p")),
-            ]
-        if not isinstance(item, list) or len(item) != 3:
-            raise RuntimeError(f"LLM returned an invalid item for {workspace_id}")
-        workspace_name, tabs, panes = item
-        if isinstance(tabs, dict):
-            tabs = list(tabs.values())
-        elif isinstance(tabs, str):
-            tabs = [tabs]
-        if isinstance(panes, dict):
-            panes = list(panes.values())
-        elif isinstance(panes, str):
-            panes = [panes]
-        if not isinstance(tabs, list) or len(tabs) != len(row["tabs"]):
-            raise RuntimeError(f"LLM returned the wrong tab count for {workspace_id}")
-        if not isinstance(panes, list) or len(panes) != len(row["panes"]):
-            raise RuntimeError(f"LLM returned the wrong pane count for {workspace_id}")
-        names = [workspace_name, *tabs, *panes]
-        if any(not isinstance(name, str) or not name.strip() for name in names):
-            raise RuntimeError(f"LLM returned an empty name for {workspace_id}")
-        oversized = [
-            name for name in panes
-            if display_width(name.strip()) > PANE_MAX_DISPLAY_WIDTH
-        ]
-        if oversized:
-            raise RuntimeError(
-                f"LLM returned an oversized pane name for {workspace_id}: {oversized[0]}"
-            )
-        normalized.append({
-            "workspace_id": workspace_id,
-            "workspace": workspace_name.strip(),
-            "tabs": {
-                tab["tab_id"]: name.strip()
-                for tab, name in zip(row["tabs"], tabs)
-            },
-            "panes": {
-                pane["pane_id"]: name.strip()
-                for pane, name in zip(row["panes"], panes)
-            },
-        })
-    return normalized
+        try:
+            normalized.append(normalize_item(item, row))
+        except ValueError as exc:
+            failures.append(skipped_workspace(row, exc))
+    return normalized, failures
 
 
 def current_workspace_ids():
@@ -2103,8 +2127,10 @@ def main():
             file=sys.stderr,
             flush=True,
         )
-    names = validate_names({"n": ruled_items}, ruled_rows)
-    usage, request_count = {}, 0
+    names, rule_failures = validate_names({"n": ruled_items}, ruled_rows)
+    if rule_failures:
+        raise RuntimeError(f"规则命名结果不合法：{rule_failures[0]['reason']}")
+    skipped, usage, request_count = [], {}, 0
     if pending:
         batch_size = workspaces_per_request(config)
         print(
@@ -2113,8 +2139,17 @@ def main():
             file=sys.stderr,
             flush=True,
         )
-        raw_names, usage, request_count = request_names(pending, config)
-        names += validate_names(raw_names, pending)
+        batch_names, skipped, usage, request_count = request_names(pending, config)
+        names += batch_names
+    if skipped:
+        # One bad item never blocks the rest: those workspaces keep their names.
+        print(
+            f"⚠️ {len(skipped)} 个 Workspace 未能命名，保留原名："
+            + "、".join(item["workspace_id"] for item in skipped),
+            file=sys.stderr,
+            flush=True,
+        )
+        print(f"  原因：{skipped[0]['reason']}", file=sys.stderr, flush=True)
     order = {row["workspace_id"]: index for index, row in enumerate(rows)}
     names.sort(key=lambda item: order[item["workspace_id"]])
     elapsed = time.monotonic() - started_at
@@ -2133,6 +2168,7 @@ def main():
         "elapsed_seconds": round(elapsed, 2),
         "usage": usage,
         "names": names,
+        "skipped": skipped,
         "mutations": mutations,
         "workspace_grouped": grouped,
         "workspace_order": workspace_order,
@@ -2166,7 +2202,7 @@ def main():
         if output["closed_during_run"] or output["added_during_run"]:
             print("运行期间关闭：", ", ".join(output["closed_during_run"]) or "无")
             print("运行期间新增：", ", ".join(output["added_during_run"]) or "无")
-    if do_apply and any(not item["ok"] for item in mutations):
+    if do_apply and (skipped or any(not item["ok"] for item in mutations)):
         return 2
     return 0
 

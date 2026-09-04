@@ -7,7 +7,7 @@
 - 读取 OpenCode、Claude Code、Codex 的原生 session
 - 使用最近两次用户输入和最新结论判断当前任务
 - 通过 Pika Chat API、DeepSeek API、Codex CLI 或 Claude CLI 生成中文短名称
-- 在写入前校验 Workspace、Tab、Pane 数量和 Pane 显示宽度
+- 在写入前校验 Workspace、Tab、Pane 数量和 Pane 显示宽度，单个 Workspace 命名失败不影响其余
 - 自动配置 Herdr Sidebar 的标题、项目路径、Git 分支和状态
 - 将同一项目的 Workspace 连续排列；SSH 会话按远程主机分组
 - SSH 会话显示 `SSH · 主机名`，不沿用切换前的本地项目目录
@@ -181,6 +181,11 @@ shell Pane 走终端截屏压缩，去掉进度条和分隔线后只保留有字
 上游偶尔会返回 HTTP 200 但生成中断（`finish_reason` 不是 `stop`），也可能吐出少一个
 右括号的 JSON。前者自动重试最多 3 次，后者会先尝试补齐括号再解析，补齐结果仍要通过
 数量校验才会应用。
+
+模型偶尔还会把某一个 Workspace 写坏——少一层名称、Tab 数量对不上、Pane 名称超宽。
+这类结构错误现在按 Workspace 单独处理：先整批重试（最多 3 次），仍然写坏就只跳过那
+一个 Workspace（保留它的原名），其余 Workspace 照常写入，结束时用 ⚠️ 列出被跳过的
+ID 和日志记录 ID，退出码为 2。整批失败（配额、鉴权）依旧直接报错退出。
 
 每次命名或运行 `herdr-autoname configure` 时，还会按当前项目稳定分组 Workspace。
 同一项目保持连续，组内维持原顺序。SSH Pane 会根据终端标题识别远程主机，Sidebar
