@@ -144,6 +144,19 @@ herdr-autoname --help
 Codex 使用 ephemeral、read-only、low-effort 无头请求；Claude 使用 safe mode、
 Haiku、low-effort 和 JSON Schema，不会创建可恢复会话或调用工具。
 
+## 规则优先分层
+
+调模型之前先跑一遍规则。一个 Workspace 里所有 Pane 都能被规则认出来时，它整个不进模型请求：
+
+- 前台进程能识别（top / lazygit / vim / docker / pytest / vite 等）→ 直接按进程命名
+- SSH Pane → 按远程主机名命名
+- **只有一个空闲 `zsh` 提示符** → 命名为「项目名 + 空闲 Shell」
+
+最后一条是收益最大的。空闲 Shell 没有任何正在进行的工作，模型只能从屏幕残留内容里编，
+实测 23 个 Workspace 里有 4 个因此被起成同一个「系统资源监控」。规则说实话，还不要钱。
+
+实测 22 个 Workspace：8 个走规则、14 个走模型，输入从 4102 降到 2811 tokens，成本降三成。
+
 ## 会话信号提取
 
 喂给模型的不是整段终端内容，而是每个 Pane 的三行信号：上一句用户诉求（`PREV`）、

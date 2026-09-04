@@ -403,6 +403,87 @@ def compact_path(path):
     return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
 
 
+# A pane running a recognizable program does not need a model to name it, and an
+# idle prompt has no work to describe at all. Cheap rules answer both; the model
+# is only worth paying for where the work is ambiguous.
+SHELL_NAMES = {"zsh", "bash", "sh", "fish", "dash", "login", "tmux", "screen"}
+PROCESS_RULES = (
+    (r"^(top|htop|btop|bpytop|glances|mole|status-go|nettop|iftop)$", "📈", "系统监控", "资源", "查看系统负载"),
+    (r"^(lazygit|gitui|tig)$", "🌿", "Git 操作", "仓库", "查看提交状态"),
+    (r"^(vim|nvim|hx|helix|emacs|nano|micro)$", "📝", "编辑文件", "编辑器", "编辑文件"),
+    (r"^(less|more|tail|bat|journalctl)$", "📜", "查看日志", "日志", "查看日志输出"),
+    (r"^(docker|docker-compose|kubectl|k9s|lazydocker)$", "🐳", "容器运维", "容器", "查看容器状态"),
+    (r"^(psql|mysql|sqlite3|redis-cli|duckdb)$", "🗄️", "数据库查询", "数据库", "查询数据库"),
+    (r"^(btm|ncdu|dust|duf)$", "💽", "磁盘占用", "磁盘", "查看磁盘占用"),
+)
+COMMAND_RULES = (
+    (r"\b(vite|next dev|nuxt|webpack|run dev|dev-server)\b", "🚀", "本地开发服务", "开发服务", "运行开发服务"),
+    (r"\b(pytest|jest|vitest|go test|cargo test|run test)\b", "🧪", "运行测试", "测试", "运行测试套件"),
+    (r"\b(run build|cargo build|make build|tsc)\b", "📦", "构建产物", "构建", "运行构建"),
+    (r"\b(git (log|status|diff))\b", "🌿", "Git 操作", "仓库", "查看仓库变更"),
+)
+
+
+def foreground_command(process_info):
+    """The deepest non-shell process is what the pane is actually running."""
+    for item in reversed((process_info or {}).get("foreground_processes") or []):
+        name = (item.get("name") or item.get("argv0") or "").lstrip("-")
+        if name and name not in SHELL_NAMES:
+            return {"name": name, "cmdline": (item.get("cmdline") or "")[:200]}
+    return {"name": "", "cmdline": ""}
+
+
+def rule_named_workspace(row):
+    """Name a whole workspace from rules, or return None to let the model take it."""
+    if any(pane["agent"] not in ("", "shell", None) for pane in row["panes"]):
+        return None
+    if not row["panes"]:
+        return None
+    pane_names = []
+    headline = None
+    for pane in row["panes"]:
+        named = rule_named_pane(pane, row)
+        if not named:
+            return None
+        emoji, theme, tab, action = named
+        headline = headline or (emoji, theme, tab)
+        pane_names.append(f"{emoji} {action}")
+    emoji, theme, tab = headline
+    return [f"{emoji} {theme}", [f"{emoji} {tab}" for _ in row["tabs"]], pane_names]
+
+
+def rule_named_pane(pane, row):
+    if pane.get("remote_host"):
+        host = pane["remote_host"]
+        return "💻", f"远程 {host}", host, f"连接 {host}"
+    command = pane.get("command") or {}
+    name = command.get("name", "")
+    cmdline = command.get("cmdline", "")
+    for pattern, emoji, theme, tab, action in PROCESS_RULES:
+        if re.match(pattern, name, re.I):
+            return emoji, theme, tab, action
+    for pattern, emoji, theme, tab, action in COMMAND_RULES:
+        if re.search(pattern, cmdline, re.I):
+            return emoji, theme, tab, action
+    if not name:
+        # A bare prompt: say so instead of inventing work from stale screen text.
+        label = row.get("project") or os.path.basename(pane.get("cwd", "")) or "Shell"
+        return "🖥️", label, "空闲", "空闲 Shell"
+    return None
+
+
+def split_rule_named(rows):
+    ruled_rows, ruled_items, pending = [], [], []
+    for row in rows:
+        item = rule_named_workspace(row)
+        if item:
+            ruled_rows.append(row)
+            ruled_items.append(item)
+        else:
+            pending.append(row)
+    return ruled_rows, ruled_items, pending
+
+
 def read_process_info(pane):
     code, stdout, _ = run([
         "herdr", "pane", "process-info", "--pane", pane["pane_id"]
@@ -550,6 +631,8 @@ def collect(only_workspaces=None):
                     "status": item.get("agent_status", "unknown"),
                     "cwd": item.get("foreground_cwd") or item.get("cwd", ""),
                     "terminal_title": item.get("terminal_title_stripped", ""),
+                    "command": foreground_command(process_infos.get(item["pane_id"])),
+                    "remote_host": remote_host(item, process_infos.get(item["pane_id"])),
                     "recent_content": contents[item["pane_id"]]["recent_content"],
                     "last_user_input": contents[item["pane_id"]]["last_user_input"],
                 }
@@ -1992,17 +2075,28 @@ def main():
             file=sys.stderr,
             flush=True,
         )
-    batch_size = workspaces_per_request(config)
-    request_count = (len(rows) + batch_size - 1) // batch_size
+    ruled_rows, ruled_items, pending = split_rule_named(rows)
     started_at = time.monotonic()
-    print(
-        f"正在使用 {config['model']} 生成名称"
-        f"（{request_count} 次请求）...",
-        file=sys.stderr,
-        flush=True,
-    )
-    raw_names, usage, request_count = request_names(rows, config)
-    names = validate_names(raw_names, rows)
+    if ruled_rows:
+        print(
+            f"规则命名 {len(ruled_rows)} 个 Workspace（无需模型）。",
+            file=sys.stderr,
+            flush=True,
+        )
+    names = validate_names({"n": ruled_items}, ruled_rows)
+    usage, request_count = {}, 0
+    if pending:
+        batch_size = workspaces_per_request(config)
+        print(
+            f"正在使用 {config['model']} 为其余 {len(pending)} 个生成名称"
+            f"（{(len(pending) + batch_size - 1) // batch_size} 次请求）...",
+            file=sys.stderr,
+            flush=True,
+        )
+        raw_names, usage, request_count = request_names(pending, config)
+        names += validate_names(raw_names, pending)
+    order = {row["workspace_id"]: index for index, row in enumerate(rows)}
+    names.sort(key=lambda item: order[item["workspace_id"]])
     elapsed = time.monotonic() - started_at
     do_apply = True
     print("正在写入 Workspace、Tab 和 Pane 名称...", file=sys.stderr, flush=True)
@@ -2015,6 +2109,7 @@ def main():
         "provider": config["provider"],
         "model": config["model"],
         "request_count": request_count,
+        "rule_named": len(ruled_rows),
         "elapsed_seconds": round(elapsed, 2),
         "usage": usage,
         "names": names,
@@ -2040,6 +2135,8 @@ def main():
         tokens = usage.get("total_tokens")
         cost = usage.get("cost")
         metrics = [config["model"], f"{elapsed:.2f}s", f"{request_count} 次请求"]
+        if ruled_rows:
+            metrics.append(f"{len(ruled_rows)} 个走规则")
         if isinstance(tokens, (int, float)):
             metrics.append(f"{int(tokens):,} tokens")
         if isinstance(cost, (int, float)):
