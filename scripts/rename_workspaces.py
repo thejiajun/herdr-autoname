@@ -1371,7 +1371,19 @@ def content_excerpt(text, limit):
 
 
 def display_width(text):
-    return sum(2 if unicodedata.east_asian_width(char) in "WFA" else 1 for char in text)
+    width = 0
+    previous_width = 0
+    for char in str(text):
+        if char == "\ufe0f":
+            if previous_width == 1:
+                width += 1
+                previous_width = 2
+            continue
+        if unicodedata.combining(char) or unicodedata.category(char) in ("Cf", "Mn", "Me"):
+            continue
+        previous_width = 2 if unicodedata.east_asian_width(char) in "WF" else 1
+        width += previous_width
+    return width
 
 
 def fit_cell(text, width):
@@ -1382,11 +1394,12 @@ def fit_cell(text, width):
     output = []
     used = 0
     for char in text:
-        char_width = 2 if unicodedata.east_asian_width(char) in "WFA" else 1
-        if used + char_width > target:
+        candidate = "".join(output) + char
+        candidate_width = display_width(candidate)
+        if candidate_width > target:
             break
         output.append(char)
-        used += char_width
+        used = candidate_width
     shortened = "".join(output) + "..."
     return shortened + " " * max(0, width - display_width(shortened))
 
