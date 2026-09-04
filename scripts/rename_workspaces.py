@@ -39,6 +39,8 @@ INJECTED_TURN = re.compile(
 FRAME_LINE = re.compile(r"^[\s\u2502\u251c\u2514\u250c\u2510\u2518\u2500\u253c\u2524"
                         r"\u258c\u2588\u2591\u254c\u256d\u256e\u2570\u256f=+|-]{12,}")
 CONFIG_DUMP = re.compile(r"^[\w.\-]+=[^\s]*$")
+# A spent quota fails the same way on every retry, so report it instead.
+QUOTA_ERROR = re.compile(r"usage limit|quota|rate limit|insufficient credit", re.I)
 PANE_MAX_DISPLAY_WIDTH = 28
 DEEPSEEK_WORKSPACES_PER_REQUEST = 3
 DEFAULT_WORKSPACES_PER_REQUEST = 30
@@ -842,7 +844,9 @@ def provider_config(args):
         raise RuntimeError("找不到 claude CLI，请先安装并登录")
     return {
         "kind": "claude",
-        "model": args.model or "haiku",
+        # Haiku ignores --effort here and spends thousands of thinking tokens
+        # on this task; Sonnet answers it directly and costs less doing so.
+        "model": args.model or "sonnet",
         "provider": "Claude CLI",
     }
 
@@ -1106,6 +1110,16 @@ def naming_schema():
     }
 
 
+def cli_failure_reason(proc):
+    """A CLI banner echoes the whole prompt; the real cause sits at the tail."""
+    output = (proc.stderr or proc.stdout).strip()
+    errors = [
+        line.strip() for line in output.splitlines()
+        if re.match(r"\s*(ERROR\b|error:)", line, re.I)
+    ]
+    return "\n".join(dict.fromkeys(errors))[:400] if errors else output[-400:]
+
+
 def request_cli_batch(rows, config, record):
     compact_input = json.dumps(
         naming_payload(rows), ensure_ascii=False, separators=(",", ":")
@@ -1138,9 +1152,9 @@ def request_cli_batch(rows, config, record):
         raise TransientLLMError(f"{config['provider']} 请求失败：{exc}") from exc
     record["response_text"] = proc.stdout
     if proc.returncode != 0:
-        raise TransientLLMError(
-            f"{config['provider']} 请求失败：{(proc.stderr or proc.stdout).strip()[:500]}"
-        )
+        reason = cli_failure_reason(proc)
+        failure = RuntimeError if QUOTA_ERROR.search(reason) else TransientLLMError
+        raise failure(f"{config['provider']} 请求失败：{reason}")
     usage = {
         "request_bytes": len(prompt.encode("utf-8")),
         "response_bytes": len(proc.stdout.encode("utf-8")),
