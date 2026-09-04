@@ -135,6 +135,11 @@ herdr-autoname --model anthropic/claude-haiku-4.5
 herdr-autoname --provider codex
 herdr-autoname --provider claude --model sonnet
 
+# 查看最近 20 次模型请求（失败时用来定位原因）
+herdr-autoname log
+herdr-autoname log failed
+herdr-autoname log 12
+
 # 查看完整帮助
 herdr-autoname --help
 ```
@@ -151,6 +156,17 @@ herdr-autoname --help
 `provider <name>` 会将选择持久保存到同一配置文件。
 Codex 使用 ephemeral、read-only、low-effort 无头请求；Claude 使用 safe mode、
 Haiku、low-effort 和 JSON Schema，不会创建可恢复会话或调用工具。
+
+## 请求日志
+
+每次模型请求都会写入 `~/.local/share/herdr-autoname/requests.db`（SQLite，只保留
+最近 200 条），记录模型、HTTP 状态、finish_reason、token 数、完整的请求输入和原始
+响应。命名失败时错误信息会直接给出记录 ID，用 `herdr-autoname log <ID>` 就能看到
+模型当时到底返回了什么。
+
+上游偶尔会返回 HTTP 200 但生成中断（`finish_reason` 不是 `stop`），也可能吐出少一个
+右括号的 JSON。前者自动重试最多 3 次，后者会先尝试补齐括号再解析，补齐结果仍要通过
+数量校验才会应用。
 
 每次命名或运行 `herdr-autoname configure` 时，还会按当前项目稳定分组 Workspace。
 同一项目保持连续，组内维持原顺序。SSH Pane 会根据终端标题识别远程主机，Sidebar

@@ -27,6 +27,10 @@ MAX_PANE_CHARS = 1_200
 PANE_MAX_DISPLAY_WIDTH = 24
 DEEPSEEK_WORKSPACES_PER_REQUEST = 3
 DEFAULT_WORKSPACES_PER_REQUEST = 20
+REQUEST_LOG_DB = os.path.expanduser("~/.local/share/herdr-autoname/requests.db")
+REQUEST_LOG_KEEP = 200
+LLM_MAX_ATTEMPTS = 3
+LLM_RETRY_BACKOFF = 1.5
 AGENT_LABELS = {
     "opencode": "◈ opencode",
     "claude": "✦ claude",
@@ -564,6 +568,81 @@ def model_command(value, as_json=False):
     return 0
 
 
+def open_request_log():
+    if not os.path.exists(REQUEST_LOG_DB):
+        raise RuntimeError(f"还没有请求记录（{REQUEST_LOG_DB} 不存在）")
+    connection = sqlite3.connect(f"file:{REQUEST_LOG_DB}?mode=ro", uri=True, timeout=5)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def print_log_detail(record):
+    for key in REQUEST_LOG_COLUMNS:
+        if key in ("request_json", "response_text"):
+            continue
+        print(f"{key}: {record.get(key)}")
+    for key, title in (("request_json", "请求输入"), ("response_text", "原始响应")):
+        text = record.get(key) or ""
+        print(f"\n--- {title}（{len(text)} 字符）---")
+        print(text)
+
+
+def log_command(value, as_json=False):
+    connection = open_request_log()
+    try:
+        if value and value.isdigit():
+            row = connection.execute(
+                "SELECT * FROM requests WHERE id = ?", (int(value),)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"找不到记录 {value}")
+            record = dict(row)
+            if as_json:
+                print(json.dumps(record, ensure_ascii=False, indent=2))
+            else:
+                print_log_detail(record)
+            return 0
+        query = "SELECT * FROM requests"
+        if value in ("failed", "errors"):
+            query += " WHERE error IS NOT NULL"
+        elif value:
+            raise RuntimeError("log 只接受记录 ID 或 failed")
+        rows = [
+            dict(item)
+            for item in connection.execute(query + " ORDER BY id DESC LIMIT 20")
+        ]
+    finally:
+        connection.close()
+    if as_json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    if not rows:
+        print("没有匹配的请求记录。")
+        return 0
+    table = [
+        [
+            str(row["id"]),
+            (row["started_at"] or "")[5:],
+            row["model"] or "",
+            str(row["attempt"] or 1),
+            f"{row['http_status'] or '-'} / {row['finish_reason'] or '-'}",
+            f"{row['completion_tokens'] or 0}+{row['reasoning_chars'] or 0}r",
+            f"{len(row['response_text'] or '')}",
+            row["error"] or "ok",
+        ]
+        for row in rows
+    ]
+    print_table_rows(
+        ["ID", "时间", "模型", "#", "HTTP/finish", "Tokens", "响应字符", "结果"],
+        table,
+        [4, 14, 24, 2, 18, 14, 8, 38],
+        stream=sys.stdout,
+    )
+    print(f"\n数据库：{REQUEST_LOG_DB}")
+    print("查看完整请求和响应：herdr-autoname log <ID>")
+    return 0
+
+
 def local_cli_authenticated(provider):
     executable = shutil.which(provider)
     if not executable:
@@ -716,20 +795,63 @@ def provider_config(args):
     }
 
 
+def balance_brackets(text):
+    """Rebuild JSON whose closing brackets are missing, stray, or out of order."""
+    closers = {"[": "]", "{": "}"}
+    stack = []
+    fixed = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            fixed.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in closers:
+            stack.append(char)
+        elif char in ("]", "}"):
+            # A closer that arrives too early means the levels below it were
+            # never closed; emit those first instead of dropping the value.
+            while stack and closers[stack[-1]] != char:
+                fixed.append(closers[stack.pop()])
+            if not stack:
+                continue  # Stray closer with nothing open: drop it.
+            stack.pop()
+        fixed.append(char)
+    if in_string:
+        fixed.append('"')
+    while fixed and fixed[-1] in " \t\r\n,":
+        fixed.pop()
+    while stack:
+        fixed.append(closers[stack.pop()])
+    return "".join(fixed)
+
+
 def extract_json(text):
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I | re.S)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.S)
-        if not match:
-            raise RuntimeError("LLM response did not contain JSON")
+    start = text.find("{")
+    if start < 0:
+        raise RuntimeError("LLM response did not contain JSON")
+    match = re.search(r"\{.*\}", text, re.S)
+    # Models drop a bracket often enough that repairing the nesting beats a
+    # retry; validate_names still rejects anything with the wrong shape.
+    candidates = [match.group(0)] if match else []
+    candidates.append(balance_brackets(text[start:]))
+    for candidate in candidates:
         try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("LLM returned malformed JSON") from exc
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    raise RuntimeError("LLM returned malformed JSON")
 
 
 def naming_payload(rows):
@@ -748,7 +870,74 @@ def naming_payload(rows):
     }
 
 
-def request_http_batch(rows, config):
+class TransientLLMError(RuntimeError):
+    """A failure that a plain retry of the same request usually clears."""
+
+
+REQUEST_LOG_COLUMNS = (
+    "started_at", "provider", "model", "workspace_ids", "workspace_count", "attempt",
+    "elapsed_ms", "http_status", "finish_reason", "prompt_tokens",
+    "completion_tokens", "reasoning_chars", "request_json", "response_text",
+    "error",
+)
+REQUEST_LOG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT,
+    provider TEXT,
+    model TEXT,
+    workspace_ids TEXT,
+    workspace_count INTEGER,
+    attempt INTEGER,
+    elapsed_ms INTEGER,
+    http_status INTEGER,
+    finish_reason TEXT,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    reasoning_chars INTEGER,
+    request_json TEXT,
+    response_text TEXT,
+    error TEXT
+)
+"""
+
+
+def log_request(record):
+    """Store one LLM exchange so a bad response stays inspectable afterwards."""
+    try:
+        os.makedirs(os.path.dirname(REQUEST_LOG_DB), exist_ok=True)
+        with sqlite3.connect(REQUEST_LOG_DB, timeout=10) as connection:
+            connection.execute(REQUEST_LOG_SCHEMA)
+            existing = {
+                column[1]
+                for column in connection.execute("PRAGMA table_info(requests)")
+            }
+            for column in REQUEST_LOG_COLUMNS:
+                if column not in existing:
+                    connection.execute(f"ALTER TABLE requests ADD COLUMN {column}")
+            cursor = connection.execute(
+                "INSERT INTO requests ({}) VALUES ({})".format(
+                    ", ".join(REQUEST_LOG_COLUMNS),
+                    ", ".join("?" * len(REQUEST_LOG_COLUMNS)),
+                ),
+                [record.get(column) for column in REQUEST_LOG_COLUMNS],
+            )
+            connection.execute(
+                "DELETE FROM requests WHERE id <= (SELECT MAX(id) FROM requests) - ?",
+                (REQUEST_LOG_KEEP,),
+            )
+            return cursor.lastrowid
+    except (sqlite3.Error, OSError):
+        return None  # Logging must never break a naming run.
+
+
+def log_hint(message, row_id):
+    if row_id is None:
+        return str(message)
+    return f"{message}（完整请求和响应：herdr-autoname log {row_id}）"
+
+
+def request_http_batch(rows, config, record):
     compact_input = json.dumps(
         naming_payload(rows), ensure_ascii=False, separators=(",", ":")
     )
@@ -769,6 +958,7 @@ def request_http_batch(rows, config):
     ):
         body["reasoning_effort"] = "low"
     request_data = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+    record["request_json"] = compact_input
     # Pika's Cloudflare edge rejects urllib's default client fingerprint. Keep
     # credentials out of argv/process listings by passing headers via a 0600
     # curl config that is deleted immediately after the one request.
@@ -795,7 +985,7 @@ def request_http_batch(rows, config):
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"LLM request failed: {exc}") from exc
+        raise TransientLLMError(f"请求失败：{exc}") from exc
     finally:
         if config_path:
             try:
@@ -804,9 +994,13 @@ def request_http_batch(rows, config):
                 pass
     response_body, separator, status = proc.stdout.rpartition("\n")
     if proc.returncode != 0:
-        raise RuntimeError(f"LLM request failed: {proc.stderr.strip()[:500]}")
+        raise TransientLLMError(f"请求失败：{proc.stderr.strip()[:500]}")
     if not separator or not status.isdigit():
         raise RuntimeError("LLM response had no HTTP status")
+    record["http_status"] = int(status)
+    record["response_text"] = response_body
+    if int(status) == 429 or int(status) >= 500:
+        raise TransientLLMError(f"上游 HTTP {status}：{response_body[:300]}")
     if not 200 <= int(status) < 300:
         raise RuntimeError(f"LLM HTTP {status}: {response_body[:500]}")
     try:
@@ -819,18 +1013,27 @@ def request_http_batch(rows, config):
         content = message.get("content") or ""
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("LLM response had no message content") from exc
-    if not content.strip():
-        reasoning = message.get("reasoning_content") or ""
-        usage = payload.get("usage") or {}
-        raise RuntimeError(
-            "LLM exhausted its output budget before JSON "
-            f"(finish={choice.get('finish_reason')}, reasoning_chars={len(reasoning)}, "
-            f"completion_tokens={usage.get('completion_tokens', 'unknown')})"
+    reasoning = message.get("reasoning_content") or ""
+    usage = payload.get("usage") or {}
+    finish_reason = choice.get("finish_reason")
+    record["response_text"] = content
+    record["finish_reason"] = finish_reason
+    record["reasoning_chars"] = len(reasoning)
+    record["prompt_tokens"] = usage.get("prompt_tokens")
+    record["completion_tokens"] = usage.get("completion_tokens")
+    if finish_reason not in (None, "stop") or not content.strip():
+        record["response_text"] = response_body
+        raise TransientLLMError(
+            f"上游生成未完成（finish={finish_reason}, "
+            f"completion_tokens={usage.get('completion_tokens', 'unknown')}, "
+            f"reasoning_chars={len(reasoning)}, content={len(content)} 字符）"
         )
-    usage = payload.get("usage", {})
     usage["request_bytes"] = len(request_data.encode("utf-8"))
     usage["response_bytes"] = len(response_body.encode("utf-8"))
-    return extract_json(content), usage
+    try:
+        return extract_json(content), usage
+    except RuntimeError as exc:
+        raise TransientLLMError(str(exc)) from exc
 
 
 def naming_schema():
@@ -851,11 +1054,12 @@ def naming_schema():
     }
 
 
-def request_cli_batch(rows, config):
+def request_cli_batch(rows, config, record):
     compact_input = json.dumps(
         naming_payload(rows), ensure_ascii=False, separators=(",", ":")
     )
     prompt = SYSTEM_PROMPT + "\n\n输入：\n" + compact_input
+    record["request_json"] = compact_input
     if config["kind"] == "codex":
         command = [
             "codex", "exec", "--skip-git-repo-check", "--ephemeral",
@@ -879,9 +1083,10 @@ def request_cli_batch(rows, config):
             timeout=250, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"{config['provider']} 请求失败：{exc}") from exc
+        raise TransientLLMError(f"{config['provider']} 请求失败：{exc}") from exc
+    record["response_text"] = proc.stdout
     if proc.returncode != 0:
-        raise RuntimeError(
+        raise TransientLLMError(
             f"{config['provider']} 请求失败：{(proc.stderr or proc.stdout).strip()[:500]}"
         )
     usage = {
@@ -892,7 +1097,10 @@ def request_cli_batch(rows, config):
         token_match = re.search(r"tokens used\s*\n([\d,]+)", proc.stderr, re.I)
         if token_match:
             usage["total_tokens"] = int(token_match.group(1).replace(",", ""))
-        return extract_json(proc.stdout), usage
+        try:
+            return extract_json(proc.stdout), usage
+        except RuntimeError as exc:
+            raise TransientLLMError(str(exc)) from exc
 
     try:
         payload = json.loads(proc.stdout)
@@ -914,9 +1122,32 @@ def request_cli_batch(rows, config):
 
 
 def request_name_batch(rows, config):
-    if config["kind"] == "http":
-        return request_http_batch(rows, config)
-    return request_cli_batch(rows, config)
+    record = {
+        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "provider": config["provider"],
+        "model": config["model"],
+        "workspace_ids": ",".join(row["workspace_id"] for row in rows),
+        "workspace_count": len(rows),
+    }
+    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+        attempt_record = dict(record, attempt=attempt)
+        started_at = time.monotonic()
+        try:
+            if config["kind"] == "http":
+                result = request_http_batch(rows, config, attempt_record)
+            else:
+                result = request_cli_batch(rows, config, attempt_record)
+        except RuntimeError as exc:
+            attempt_record["error"] = str(exc)
+            attempt_record["elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
+            row_id = log_request(attempt_record)
+            if not isinstance(exc, TransientLLMError) or attempt == LLM_MAX_ATTEMPTS:
+                raise RuntimeError(log_hint(exc, row_id)) from exc
+            time.sleep(LLM_RETRY_BACKOFF * attempt)
+            continue
+        attempt_record["elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
+        log_request(attempt_record)
+        return result
 
 
 def merge_usage(items):
@@ -1502,6 +1733,9 @@ def main():
             "  herdr-autoname provider                查看 Provider 和可用状态\n"
             "  herdr-autoname provider codex          持久切换到 Codex CLI\n"
             "  herdr-autoname model                   查看默认模型\n"
+            "  herdr-autoname log                     查看最近 20 次模型请求\n"
+            "  herdr-autoname log failed              只看失败的请求\n"
+            "  herdr-autoname log 12                  打印第 12 条的完整请求和响应\n"
             "  herdr-autoname model google/gemini-3.7-flash\n"
             "                                           持久切换默认模型"
         ),
@@ -1509,13 +1743,14 @@ def main():
     )
     commands = parser.add_argument_group("命令")
     commands.add_argument(
-        "command", nargs="?", choices=("preview", "configure", "projects", "model", "provider"),
-        metavar="{preview,configure,projects,model,provider}",
-        help="预览会话、修复侧边栏，或管理模型和 Provider",
+        "command", nargs="?",
+        choices=("preview", "configure", "projects", "model", "provider", "log"),
+        metavar="{preview,configure,projects,model,provider,log}",
+        help="预览会话、修复侧边栏、管理模型和 Provider，或查看请求日志",
     )
     commands.add_argument(
-        "value", nargs="?", metavar="值|reset",
-        help="配合 model/provider 使用：设置值，或用 reset 恢复默认值",
+        "value", nargs="?", metavar="值|reset|ID",
+        help="配合 model/provider 设置值（reset 恢复默认），或配合 log 传记录 ID / failed",
     )
     options = parser.add_argument_group("选项")
     options.add_argument("-h", "--help", action="help", help="显示此帮助信息并退出")
@@ -1541,6 +1776,8 @@ def main():
         return model_command(args.value, args.json)
     if args.command == "provider":
         return provider_command(args.value, args)
+    if args.command == "log":
+        return log_command(args.value, args.json)
     if args.value:
         parser.error("value 只能与 model 或 provider 命令一起使用")
 
