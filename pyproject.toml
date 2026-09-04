@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "herdr-autoname"
-version = "0.1.0"
+version = "0.2.0"
 description = "Automatically name Herdr workspaces, tabs, and panes from recent agent sessions."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Jiajun Chen", email = "presjch@gmail.com" }]
+authors = [{ name = "Jiajun Chen" }]
 keywords = ["herdr", "cli", "workspace", "agent", "naming"]
 classifiers = [
   "Development Status :: 3 - Alpha",

@@ -41,6 +41,14 @@ STATUS_ICONS = {
     "completed": "✓",
     "unknown": "·",
 }
+PROVIDERS = ("auto", "pika", "deepseek", "codex", "claude")
+PROVIDER_LABELS = {
+    "auto": "自动选择",
+    "pika": "Pika Chat API",
+    "deepseek": "DeepSeek API",
+    "codex": "Codex CLI",
+    "claude": "Claude CLI",
+}
 HERDR_CONFIG = os.path.expanduser("~/.config/herdr/config.toml")
 SIDEBAR_ROWS = {
     "ui.sidebar.spaces": (
@@ -387,7 +395,6 @@ def env_value(name, env_file=None):
     paths = [env_file] if env_file else [
         os.path.join(os.getcwd(), ".env"),
         os.path.expanduser("~/.config/herdr/autoname.env"),
-        os.path.expanduser("~/pika_work/ugc-playbook-dashboard/.env"),
     ]
     for path in paths:
         if not path or not os.path.isfile(path):
@@ -437,6 +444,10 @@ def saved_model():
     return env_value("HERDR_AUTONAME_MODEL", AUTONAME_ENV)
 
 
+def saved_provider():
+    return env_value("HERDR_AUTONAME_PROVIDER", AUTONAME_ENV) or "auto"
+
+
 def model_command(value, as_json=False):
     if value == "reset":
         set_env_value(AUTONAME_ENV, "HERDR_AUTONAME_MODEL", "")
@@ -460,27 +471,156 @@ def model_command(value, as_json=False):
     return 0
 
 
-def deepseek_config(args):
+def local_cli_authenticated(provider):
+    executable = shutil.which(provider)
+    if not executable:
+        return False
+    if provider == "codex":
+        code, stdout, stderr = run([executable, "login", "status"], timeout=10)
+        return code == 0 and "logged in" in f"{stdout}\n{stderr}".lower()
+    code, stdout, _ = run([executable, "auth", "status", "--json"], timeout=10)
+    if code != 0:
+        return False
+    try:
+        return bool(json.loads(stdout).get("loggedIn"))
+    except json.JSONDecodeError:
+        return False
+
+
+def provider_availability(args):
+    return {
+        "pika": bool(env_value("PIKA_CHAT_API_KEY", args.env_file)),
+        "deepseek": bool(env_value("DEEPSEEK_API_KEY", args.env_file)),
+        "codex": local_cli_authenticated("codex"),
+        "claude": local_cli_authenticated("claude"),
+    }
+
+
+def resolve_provider(args, available=None):
+    requested = args.provider or saved_provider()
+    if requested != "auto":
+        return requested
+    available = available or provider_availability(args)
+    return next((name for name in ("pika", "deepseek", "codex", "claude") if available[name]), None)
+
+
+def provider_command(value, args):
+    available = provider_availability(args)
+    if value == "reset":
+        set_env_value(AUTONAME_ENV, "HERDR_AUTONAME_PROVIDER", "")
+        selected = "auto"
+    elif value:
+        if value not in PROVIDERS:
+            raise RuntimeError("Provider 必须是：" + ", ".join(PROVIDERS))
+        if value != "auto" and not available[value]:
+            raise RuntimeError(f"Provider {value} 当前不可用或尚未登录")
+        set_env_value(AUTONAME_ENV, "HERDR_AUTONAME_PROVIDER", value)
+        selected = value
+    else:
+        selected = saved_provider()
+    resolved = resolve_provider(args, available) if selected == "auto" else selected
+    if not value and sys.stdin.isatty() and sys.stdout.isatty():
+        choices = ["auto", *(name for name in PROVIDERS[1:] if available[name])]
+        print("可选 Provider：")
+        for index, name in enumerate(choices, 1):
+            suffix = "（当前）" if name == selected else ""
+            print(f"  {index}. {PROVIDER_LABELS[name]} {suffix}".rstrip())
+        answer = input(f"选择 [当前：{PROVIDER_LABELS.get(selected, selected)}]：").strip()
+        if answer:
+            if not answer.isdigit() or not 1 <= int(answer) <= len(choices):
+                raise RuntimeError("无效选择")
+            selected = choices[int(answer) - 1]
+            set_env_value(AUTONAME_ENV, "HERDR_AUTONAME_PROVIDER", selected)
+            resolved = resolve_provider(args, available) if selected == "auto" else selected
+    result = {
+        "provider": selected,
+        "resolved": resolved,
+        "available": available,
+        "source": AUTONAME_ENV if env_value("HERDR_AUTONAME_PROVIDER", AUTONAME_ENV) else "built-in default",
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"Provider: {selected}" + (f" → {resolved}" if selected == "auto" and resolved else ""))
+        print("可用：" + "  ".join(
+            f"{'✓' if enabled else '✕'} {name}" for name, enabled in available.items()
+        ))
+        print(f"Source: {result['source']}")
+    return 0
+
+
+def initialize_provider(args):
+    if args.provider or env_value("HERDR_AUTONAME_PROVIDER", AUTONAME_ENV):
+        return None, provider_availability(args)
+    available = provider_availability(args)
+    selected = resolve_provider(args, available)
+    if not selected:
+        return None, available
+    set_env_value(AUTONAME_ENV, "HERDR_AUTONAME_PROVIDER", selected)
+    return selected, available
+
+
+def print_provider_detection(config, available, initialized=None):
+    local = "  ".join(
+        f"{'✓' if available[name] else '✕'} {PROVIDER_LABELS[name]}"
+        for name in ("codex", "claude")
+    )
+    if initialized:
+        detected = ", ".join(
+            PROVIDER_LABELS[name] for name in PROVIDERS[1:] if available[name]
+        )
+        print(
+            f"首次运行：检测到 {detected}；已自动选择 {PROVIDER_LABELS[initialized]}。",
+            file=sys.stderr,
+        )
+    print(f"Provider：{config['provider']}  |  本地无头：{local}", file=sys.stderr)
+
+
+def provider_config(args):
+    provider = resolve_provider(args)
+    if not provider:
+        raise RuntimeError(
+            "没有可用 Provider：请配置 PIKA_CHAT_API_KEY / DEEPSEEK_API_KEY，"
+            "或安装并登录 codex / claude CLI"
+        )
     requested_model = args.model or saved_model()
-    direct_key = env_value("DEEPSEEK_API_KEY", args.env_file)
-    if direct_key and (not requested_model or requested_model in ("deepseek-chat", "deepseek-reasoner")):
+    if provider == "deepseek":
+        direct_key = env_value("DEEPSEEK_API_KEY", args.env_file)
+        if not direct_key:
+            raise RuntimeError("Provider deepseek 需要 DEEPSEEK_API_KEY")
         return {
+            "kind": "http",
             "base": args.base_url or DIRECT_BASE,
-            "model": requested_model or DIRECT_MODEL,
+            "model": requested_model if requested_model in ("deepseek-chat", "deepseek-reasoner") else DIRECT_MODEL,
             "headers": {"Authorization": f"Bearer {direct_key}"},
             "provider": "DeepSeek API",
         }
-    pika_key = env_value("PIKA_CHAT_API_KEY", args.env_file)
-    if pika_key:
+    if provider == "pika":
+        pika_key = env_value("PIKA_CHAT_API_KEY", args.env_file)
+        if not pika_key:
+            raise RuntimeError("Provider pika 需要 PIKA_CHAT_API_KEY")
         return {
+            "kind": "http",
             "base": args.base_url or os.environ.get("PIKA_API_BASE", PIKA_BASE),
             "model": requested_model or PIKA_MODEL,
             "headers": {"X-API-Key": pika_key},
             "provider": "Pika Chat API",
         }
-    raise RuntimeError(
-        "Missing DEEPSEEK_API_KEY or PIKA_CHAT_API_KEY in the environment/current .env"
-    )
+    if provider == "codex":
+        if not shutil.which("codex"):
+            raise RuntimeError("找不到 codex CLI，请先安装并登录")
+        return {
+            "kind": "codex",
+            "model": args.model or "CLI default",
+            "provider": "Codex CLI",
+        }
+    if not shutil.which("claude"):
+        raise RuntimeError("找不到 claude CLI，请先安装并登录")
+    return {
+        "kind": "claude",
+        "model": args.model or "haiku",
+        "provider": "Claude CLI",
+    }
 
 
 def extract_json(text):
@@ -515,7 +655,7 @@ def naming_payload(rows):
     }
 
 
-def request_name_batch(rows, config):
+def request_http_batch(rows, config):
     compact_input = json.dumps(
         naming_payload(rows), ensure_ascii=False, separators=(",", ":")
     )
@@ -598,6 +738,92 @@ def request_name_batch(rows, config):
     usage["request_bytes"] = len(request_data.encode("utf-8"))
     usage["response_bytes"] = len(response_body.encode("utf-8"))
     return extract_json(content), usage
+
+
+def naming_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "n": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 3,
+                },
+            }
+        },
+        "required": ["n"],
+        "additionalProperties": False,
+    }
+
+
+def request_cli_batch(rows, config):
+    compact_input = json.dumps(
+        naming_payload(rows), ensure_ascii=False, separators=(",", ":")
+    )
+    prompt = SYSTEM_PROMPT + "\n\n输入：\n" + compact_input
+    if config["kind"] == "codex":
+        command = [
+            "codex", "exec", "--skip-git-repo-check", "--ephemeral",
+            "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only",
+            "--color", "never", "-c", 'model_reasoning_effort="low"',
+        ]
+        if config["model"] != "CLI default":
+            command.extend(["--model", config["model"]])
+        command.append("-")
+    else:
+        command = [
+            "claude", "-p", "--safe-mode", "--model", config["model"],
+            "--effort", "low", "--output-format", "json",
+            "--no-session-persistence", "--permission-mode", "dontAsk",
+            "--tools", "", "--json-schema",
+            json.dumps(naming_schema(), separators=(",", ":")),
+        ]
+    try:
+        proc = subprocess.run(
+            command, input=prompt, capture_output=True, text=True,
+            timeout=250, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"{config['provider']} 请求失败：{exc}") from exc
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"{config['provider']} 请求失败：{(proc.stderr or proc.stdout).strip()[:500]}"
+        )
+    usage = {
+        "request_bytes": len(prompt.encode("utf-8")),
+        "response_bytes": len(proc.stdout.encode("utf-8")),
+    }
+    if config["kind"] == "codex":
+        token_match = re.search(r"tokens used\s*\n([\d,]+)", proc.stderr, re.I)
+        if token_match:
+            usage["total_tokens"] = int(token_match.group(1).replace(",", ""))
+        return extract_json(proc.stdout), usage
+
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Claude CLI 返回了无效 JSON") from exc
+    claude_usage = payload.get("usage") or {}
+    usage.update(claude_usage)
+    usage["total_tokens"] = sum(
+        claude_usage.get(key, 0)
+        for key in (
+            "input_tokens", "cache_creation_input_tokens",
+            "cache_read_input_tokens", "output_tokens",
+        )
+    )
+    usage["cost"] = payload.get("total_cost_usd", 0)
+    structured = payload.get("structured_output")
+    result = structured if isinstance(structured, dict) else extract_json(payload.get("result", ""))
+    return result, usage
+
+
+def request_name_batch(rows, config):
+    if config["kind"] == "http":
+        return request_http_batch(rows, config)
+    return request_cli_batch(rows, config)
 
 
 def merge_usage(items):
@@ -991,6 +1217,8 @@ def main():
             "  herdr-autoname --dry-run               不调用模型，只预览输出格式\n"
             "  herdr-autoname preview                 只查看当前会话，不调用模型\n"
             "  herdr-autoname configure               只修复侧边栏配置和 metadata\n"
+            "  herdr-autoname provider                查看 Provider 和可用状态\n"
+            "  herdr-autoname provider codex          持久切换到 Codex CLI\n"
             "  herdr-autoname model                   查看默认模型\n"
             "  herdr-autoname model google/gemini-3.7-flash\n"
             "                                           持久切换默认模型"
@@ -999,13 +1227,13 @@ def main():
     )
     commands = parser.add_argument_group("命令")
     commands.add_argument(
-        "command", nargs="?", choices=("preview", "configure", "projects", "model"),
-        metavar="{preview,configure,projects,model}",
-        help="预览会话、修复侧边栏，或管理默认模型",
+        "command", nargs="?", choices=("preview", "configure", "projects", "model", "provider"),
+        metavar="{preview,configure,projects,model,provider}",
+        help="预览会话、修复侧边栏，或管理模型和 Provider",
     )
     commands.add_argument(
-        "value", nargs="?", metavar="模型ID|reset",
-        help="配合 model 使用：设置模型 ID，或用 reset 恢复默认值",
+        "value", nargs="?", metavar="值|reset",
+        help="配合 model/provider 使用：设置值，或用 reset 恢复默认值",
     )
     options = parser.add_argument_group("选项")
     options.add_argument("-h", "--help", action="help", help="显示此帮助信息并退出")
@@ -1019,14 +1247,26 @@ def main():
     options.add_argument("--env-file", metavar="路径", help="指定包含 API Key 的 env 文件")
     options.add_argument("--base-url", metavar="URL", help="临时覆盖 OpenAI 兼容 API 地址")
     options.add_argument("--model", metavar="模型ID", help="仅本次运行临时覆盖 LLM 模型")
+    options.add_argument(
+        "--provider", choices=PROVIDERS, metavar="名称",
+        help="仅本次使用 auto/pika/deepseek/codex/claude",
+    )
     options.add_argument("--json", action="store_true", help="输出机器可读的 JSON")
     options.add_argument("--verbose", action="store_true", help="预览时额外显示 Tab 和 Pane 详情")
     args = parser.parse_args()
 
     if args.command == "model":
         return model_command(args.value, args.json)
+    if args.command == "provider":
+        return provider_command(args.value, args)
     if args.value:
-        parser.error("value is only valid with the model command")
+        parser.error("value 只能与 model 或 provider 命令一起使用")
+
+    config = None
+    if args.command is None and not args.dry_run:
+        initialized, available = initialize_provider(args)
+        config = provider_config(args)
+        print_provider_detection(config, available, initialized)
 
     print("正在读取 Herdr 会话...", file=sys.stderr, flush=True)
     rows, before_ids = collect(args.workspace)
@@ -1069,7 +1309,6 @@ def main():
             file=sys.stderr,
             flush=True,
         )
-    config = deepseek_config(args)
     batch_size = (
         DEEPSEEK_WORKSPACES_PER_REQUEST
         if config["model"].startswith("deepseek/")
