@@ -41,6 +41,11 @@ FRAME_LINE = re.compile(r"^[\s\u2502\u251c\u2514\u250c\u2510\u2518\u2500\u253c\u
 CONFIG_DUMP = re.compile(r"^[\w.\-]+=[^\s]*$")
 # A spent quota fails the same way on every retry, so report it instead.
 QUOTA_ERROR = re.compile(r"usage limit|quota|rate limit|insufficient credit", re.I)
+# The running Herdr server is older than the CLI that just upgraded on disk.
+SERVER_BEHIND = re.compile(
+    r"client protocol (\d+) is newer than server protocol (\d+)", re.I
+)
+HANDOFF_TIMEOUT = 180
 PANE_MAX_DISPLAY_WIDTH = 28
 DEEPSEEK_WORKSPACES_PER_REQUEST = 3
 DEFAULT_WORKSPACES_PER_REQUEST = 30
@@ -122,14 +127,57 @@ SYSTEM_PROMPT = """给 Herdr 工作空间命名。输入：{"w":[{"n":"当前wor
 - 只输出 JSON，不要解释。"""
 
 
-def run(args, timeout=120):
+def run(args, timeout=120, allow_handoff=True):
     try:
         proc = subprocess.run(
             args, capture_output=True, text=True, timeout=timeout, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, "", str(exc)
-    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    code = proc.returncode
+    stdout, stderr = proc.stdout.strip(), proc.stderr.strip()
+    if code != 0 and allow_handoff and args[:1] == ["herdr"]:
+        if hand_off_stale_server(f"{stderr}\n{stdout}"):
+            return run(args, timeout=timeout, allow_handoff=False)
+    return code, stdout, stderr
+
+
+_HANDOFF = {"done": False}
+
+
+def hand_off_stale_server(message):
+    """Move live panes onto a server built from the herdr binary now on disk.
+
+    Upgrading herdr only swaps the file; the server keeps serving the code it
+    loaded at boot, so a fresh CLI outruns its own server until the panes are
+    handed over. Only this direction is ours to repair: an older CLI has to be
+    upgraded instead, and handing off would drag the server back with it.
+    """
+    match = SERVER_BEHIND.search(message or "")
+    if not match:
+        return False
+    if _HANDOFF["done"]:
+        raise RuntimeError(
+            "交接后 Herdr 服务器仍是旧版本。请手动运行 `herdr server stop` 再重开 herdr"
+            "（会结束 pane 里正在运行的进程）。"
+        )
+    _HANDOFF["done"] = True
+    client, server = match.group(1), match.group(2)
+    print(
+        f"Herdr 服务器还在旧版本上（协议 {server}，命令行已是 {client}），"
+        "正在把 pane 交接给新版服务器...",
+        file=sys.stderr, flush=True,
+    )
+    code, stdout, stderr = run(
+        ["herdr", "server", "live-handoff"], timeout=HANDOFF_TIMEOUT, allow_handoff=False
+    )
+    if code != 0:
+        raise RuntimeError(
+            "Herdr 服务器版本落后，自动交接失败："
+            + (stderr or stdout or f"exited {code}")
+        )
+    print("交接完成，pane 未中断，继续执行。", file=sys.stderr, flush=True)
+    return True
 
 
 def run_json(args, timeout=120):

@@ -8,6 +8,7 @@
 - 使用最近两次用户输入和最新结论判断当前任务
 - 通过 Pika Chat API、DeepSeek API、Codex CLI 或 Claude CLI 生成中文短名称
 - 在写入前校验 Workspace、Tab、Pane 数量和 Pane 显示宽度，单个 Workspace 命名失败不影响其余
+- Herdr 升级后服务器还在跑旧版时，自动 `herdr server live-handoff` 交接 pane 并重试，不中断正在运行的 agent
 - 自动配置 Herdr Sidebar 的标题、项目路径、Git 分支和状态
 - 将同一项目的 Workspace 连续排列；SSH 会话按远程主机分组
 - SSH 会话显示 `SSH · 主机名`，不沿用切换前的本地项目目录
