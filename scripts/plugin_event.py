@@ -38,9 +38,9 @@ def trigger_every():
     try:
         value = int(raw)
     except ValueError as exc:
-        raise RuntimeError("HERDR_AUTONAME_TRIGGER_EVERY 必须是正整数") from exc
+        raise RuntimeError("HERDR_AUTONAME_TRIGGER_EVERY must be a positive integer") from exc
     if value < 1:
-        raise RuntimeError("HERDR_AUTONAME_TRIGGER_EVERY 必须大于 0")
+        raise RuntimeError("HERDR_AUTONAME_TRIGGER_EVERY must be greater than zero")
     return value
 
 

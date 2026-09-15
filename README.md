@@ -1,270 +1,175 @@
 # herdr-autoname
 
-根据 Agent 最近的真实会话内容，自动更新 Herdr 的 Workspace、Tab 和 Pane 名称。
+[简体中文](README.zh-CN.md)
 
-## 功能
+Automatically rename Herdr workspaces, tabs, and panes from the latest real conversations in each coding-agent session.
 
-- 读取 OpenCode、Claude Code、Codex 的原生 session
-- 使用最近两次用户输入和最新结论判断当前任务
-- 通过 Pika Chat API、DeepSeek API、Codex CLI 或 Claude CLI 生成中文短名称
-- 在写入前校验 Workspace、Tab、Pane 数量和 Pane 显示宽度，单个 Workspace 命名失败不影响其余
-- Herdr 升级后服务器还在跑旧版时，自动 `herdr server live-handoff` 交接 pane 并重试，不中断正在运行的 agent
-- 自动配置 Herdr Sidebar 的标题、项目路径、Git 分支和状态
-- 将同一项目的 Workspace 连续排列；SSH 会话按远程主机分组
-- SSH 会话显示 `SSH · 主机名`，不沿用切换前的本地项目目录
-- `--dry-run` 无需 API Key，不调用模型、不修改名称；宽终端用粗体双栏预览 Herdr Sidebar，窄终端自动改为上下排列
-- 仅依赖 Python 标准库
-- 可作为 Herdr Plugin 安装：手动 Action，或每个 Pane 累计 N 条新对话后自动命名
+## Highlights
 
-## 前提
+- Runs as a native Herdr Plugin with an interactive Settings Popup.
+- Automatically renames after every configurable number of user conversations per pane.
+- Reads native OpenCode, Claude Code, and Codex sessions.
+- Uses the latest two user requests and the latest agent conclusion instead of raw terminal noise.
+- Supports Pika, OpenRouter, DeepSeek, Pi, Claude, Codex, Gemini, Cursor, and Grok providers.
+- Applies deterministic names to recognizable tools, SSH panes, and idle shells without calling a model.
+- Validates workspace, tab, and pane counts before applying names.
+- Keeps one malformed workspace from blocking all other updates.
+- Groups workspaces by project and reports project, Git, and remote-host metadata to the Herdr Sidebar.
+- Uses only the Python standard library.
 
-- Python 3.10+
-- 已安装并运行 Herdr，且 `herdr` 命令可用
-- 可使用 `PIKA_CHAT_API_KEY`、`DEEPSEEK_API_KEY`，或本机已登录的 Codex/Claude CLI
+## Requirements
 
-## 安装
+- Herdr 0.9.0 or later
+- Python 3.10 or later
+- One available provider: an API key or an authenticated local agent CLI
 
-### Herdr Plugin（推荐）
-
-Herdr 0.9.0 及以上可以直接从 GitHub 安装：
+## Install as a Herdr Plugin
 
 ```bash
 herdr plugin install thejiajun/herdr-autoname
 ```
 
-插件默认启用两种入口：
+The plugin registers:
 
-- `rename-now` Action：立即运行一次命名
-- `preview` Action：不调用模型、不修改名称，预览当前 Workspace
-- `pane.agent_status_changed` Event：Agent 完成一轮后检查；同一 Pane 每累计 3 条新用户消息触发一次
+- `open-settings` — open the interactive Settings Popup
+- `preview` — print a read-only Sidebar preview
+- `rename-now` — rename immediately
+- `pane.agent_status_changed` — count completed user conversations and trigger automatically
 
-修改自动触发间隔：
+Open Settings:
 
 ```bash
-config_dir="$(herdr plugin config-dir thejiajun.autoname)"
-printf 'HERDR_AUTONAME_TRIGGER_EVERY=5\n' > "$config_dir/autoname.env"
+herdr plugin action invoke thejiajun.autoname.open-settings
 ```
 
-设为 `1` 表示每轮触发。临时关闭自动触发但保留手动 Action：
+The Popup lets you select a provider and model, change the conversation interval, enable or disable automatic naming, preview the Sidebar, and run a rename immediately.
+
+The default interval is 3 completed user conversations per pane. The first completed turn observed after installation counts as turn 1; older history is not counted.
+
+Plugin configuration is stored in Herdr's isolated config directory:
 
 ```bash
-config_dir="$(herdr plugin config-dir thejiajun.autoname)"
-printf 'HERDR_AUTONAME_ENABLED=false\n' >> "$config_dir/autoname.env"
+herdr plugin config-dir thejiajun.autoname
 ```
 
-Provider、模型和 API Key 也写入这个 `autoname.env`。插件请求日志和每个 Pane 的
-对话计数保存在 Herdr 分配的 Plugin State 目录，不写入仓库。第一次观察 Session 时会把
-刚完成的一轮记为第 1 条，但不会把安装插件以前的历史对话全部算进去。
+Plugin counters, provider cache, and request logs are stored in Herdr's isolated plugin state directory. They are never written into the repository.
 
-手动执行及查看日志：
+### Manual actions
 
 ```bash
-herdr plugin action invoke thejiajun.autoname.rename-now
 herdr plugin action invoke thejiajun.autoname.preview
+herdr plugin action invoke thejiajun.autoname.rename-now
 herdr plugin log list --plugin thejiajun.autoname
 ```
 
-本地开发使用：
+### Local plugin development
 
 ```bash
 herdr plugin link /path/to/herdr-autoname
 ```
 
-### 独立 CLI
+## Install as a standalone CLI
 
-推荐使用 `uv`：
+With `uv`:
 
 ```bash
 uv tool install git+https://github.com/thejiajun/herdr-autoname.git
 ```
 
-### 在其他电脑安装
-
-不需要克隆仓库。在任何目录打开终端，确认已安装 `uv` 和 Herdr CLI 后运行：
+Upgrade or reinstall:
 
 ```bash
 uv tool install --force git+https://github.com/thejiajun/herdr-autoname.git
 ```
 
-这条命令同时适用于首次安装和覆盖升级。安装后可检查 Provider：
-
-```bash
-herdr-autoname provider
-```
-
-也可以使用 `pipx`：
+With `pipx`:
 
 ```bash
 pipx install git+https://github.com/thejiajun/herdr-autoname.git
 ```
 
-## 配置 Provider
+## Providers
 
-默认使用 `auto`，按以下顺序选择第一个可用通道：
-
-1. `pika`：检测到 `PIKA_CHAT_API_KEY`
-2. `deepseek`：检测到 `DEEPSEEK_API_KEY`
-3. `codex`：检测到本机 `codex` 命令
-4. `claude`：检测到本机 `claude` 命令
-
-查看当前选择和可用状态：
+The default `auto` mode selects the first available provider. Use the Settings Popup for the plugin, or the following commands for the standalone CLI:
 
 ```bash
-herdr-autoname provider
-```
-
-### 可用 Provider
-
-实测 23 个 Workspace 一轮命名：
-
-| Provider | 类型 | 耗时 | 成本 | 凭证 |
-|---|---|---|---|---|
-| pika | HTTP | 5.9s | $0.0057 | `PIKA_CHAT_API_KEY` |
-| openrouter | HTTP | 6.8s | $0.0058 | `OPENROUTER_API_KEY`，没有则借用 pi 的 OAuth token |
-| deepseek | HTTP | — | — | `DEEPSEEK_API_KEY` |
-| pi | CLI | 5.3s | — | `pi auth`（任一 provider 就绪即可） |
-| claude | CLI | 10.7s | $0.0185 | `claude` 已登录 |
-| codex | CLI | — | — | `codex login` |
-| gemini | CLI | 44.5s | — | `gemini` OAuth 或 `GEMINI_API_KEY` |
-| cursor | CLI | 52.8s | — | `cursor-agent` 已登录 |
-| grok | CLI | — | — | `grok login` 或 `XAI_API_KEY` |
-
-HTTP Provider 只需要 base URL、模型名和鉴权头，任何 OpenAI 兼容端点都能接进来。
-Agent CLI 每次都要启动完整会话，所以只适合当没有 API Key 时的兜底；调用时统一关掉
-工具、会话保存、skill、MCP 和扩展，并把系统提示直接替换成命名提示——Claude CLI
-一轮的上下文因此从 28k 降到 8k token。Pane 对话一律走 stdin，不进进程列表。
-
-### 凭证放哪
-
-Pika / DeepSeek / OpenRouter 的 Key 写进 `~/.config/herdr/autoname.env`、当前目录的
-`.env`，或导出为环境变量。密钥不会出现在命令参数和输出中。
-
-## 使用
-
-```bash
-# 调用模型并更新全部名称
-herdr-autoname
-
-# 不调用模型、不修改名称，预览分组后的 Herdr Sidebar
-herdr-autoname -d              # 等同 --dry-run
-
-# 只查看当前会话状态
-herdr-autoname preview
-
-# 只更新 Sidebar 配置和 metadata
-herdr-autoname configure
-
-# 仅处理指定 Workspace
-herdr-autoname --workspace w1W
-
-# 查看和切换默认模型
-herdr-autoname model
-herdr-autoname model google/gemini-3.7-flash
-herdr-autoname model reset
-
-# 查看、自动选择或切换 Provider
 herdr-autoname provider
 herdr-autoname provider auto
+herdr-autoname provider pi
 herdr-autoname provider codex
-herdr-autoname provider claude
+```
 
-# 临时使用其他模型
-herdr-autoname --model anthropic/claude-haiku-4.5
-herdr-autoname --provider codex
-herdr-autoname --provider claude --model sonnet
+| Provider | Type | Credential |
+| --- | --- | --- |
+| `pika` | HTTP | `PIKA_CHAT_API_KEY` |
+| `openrouter` | HTTP | `OPENROUTER_API_KEY`, or Pi OAuth when available |
+| `deepseek` | HTTP | `DEEPSEEK_API_KEY` |
+| `pi` | CLI | Any provider authenticated through `pi auth` |
+| `claude` | CLI | Authenticated Claude CLI |
+| `codex` | CLI | `codex login` |
+| `gemini` | CLI | Gemini OAuth or `GEMINI_API_KEY` |
+| `cursor` | CLI | Authenticated Cursor Agent CLI |
+| `grok` | CLI | `grok login` or `XAI_API_KEY` |
 
-# 查看最近 20 次模型请求（失败时用来定位原因）
+HTTP providers use an OpenAI-compatible endpoint adapter. Local CLI providers run as ephemeral, tool-disabled naming requests and do not create resumable sessions. Conversation content is sent over stdin rather than process arguments.
+
+## Standalone CLI usage
+
+```bash
+# Rename all current workspaces
+herdr-autoname
+
+# Preview without calling a model or changing labels
+herdr-autoname --dry-run
+
+# Inspect current sessions
+herdr-autoname preview
+
+# Refresh Sidebar configuration and metadata
+herdr-autoname configure
+
+# Rename one workspace
+herdr-autoname --workspace w1W
+
+# Manage provider and model
+herdr-autoname provider
+herdr-autoname provider pi
+herdr-autoname model
+herdr-autoname model google/gemini-3.7-flash
+
+# Inspect request logs
 herdr-autoname log
 herdr-autoname log failed
 herdr-autoname log 12
-
-# 查看完整帮助
-herdr-autoname --help
 ```
 
-默认模型是 `google/gemini-3.7-flash`。模型设置保存在
-`~/.config/herdr/autoname.env`。
+## How naming works
 
-首次执行真实命名时，CLI 会检测 API Key，以及本机 Codex/Claude CLI 是否安装并
-登录，再按 `Pika Key → DeepSeek Key → Codex CLI → Claude CLI` 自动选择并持久
-保存一个 Provider，同时在终端说明检测和选择结果。之后运行 `herdr-autoname provider`
-会在交互式终端显示可选 Provider 菜单；在脚本或管道里则只输出状态，不等待输入。
-`provider auto` 可恢复动态选择。
+Before using a model, the tool applies deterministic rules:
 
-**Provider 只在设置时检测。** 每个本地 CLI 的登录检测都要起一个进程，串行跑完一轮
-要十几秒，这段等待原先卡在每次命名之前。现在只有 `herdr-autoname provider` 和首次
-自动选择才真正检测（并行执行，约 1 秒），结果缓存在
-`~/.local/share/herdr-autoname/providers.json`；已经选定 Provider 的命名运行直接读
-缓存，零进程开销，启动行标注「上次检测」。新装或新登录一个 CLI 后，跑一次
-`herdr-autoname provider` 刷新缓存即可。
+- Known foreground tools such as `lazygit`, `vim`, `docker`, `pytest`, and `vite` are named directly.
+- SSH panes are named from the remote host.
+- A workspace containing only one idle shell is named from its project and idle state.
 
-`provider <name>` 会将选择持久保存到同一配置文件。
-Codex 使用 ephemeral、read-only、low-effort 无头请求；Claude 使用 safe mode、
-Haiku、low-effort 和 JSON Schema，不会创建可恢复会话或调用工具。
+For agent panes, the model receives three compact signals per pane:
 
-## 规则优先分层
+- `PREV` — the previous user request
+- `ASK` — the current user request
+- `DID` — the latest agent conclusion
 
-调模型之前先跑一遍规则。一个 Workspace 里所有 Pane 都能被规则认出来时，它整个不进模型请求：
+Agent reasoning, tool calls, tool results, progress bars, injected hooks, compact summaries, and configuration dumps are filtered out.
 
-- 前台进程能识别（top / lazygit / vim / docker / pytest / vite 等）→ 直接按进程命名
-- SSH Pane → 按远程主机名命名
-- **只有一个空闲 `zsh` 提示符** → 命名为「项目名 + 空闲 Shell」
+## Reliability and logs
 
-最后一条是收益最大的。空闲 Shell 没有任何正在进行的工作，模型只能从屏幕残留内容里编，
-实测 23 个 Workspace 里有 4 个因此被起成同一个「系统资源监控」。规则说实话，还不要钱。
+Model requests are recorded in a local SQLite database and capped at the latest 200 entries. The log includes provider, model, response status, finish reason, token usage, request input, and raw response.
 
-实测 22 个 Workspace：8 个走规则、14 个走模型，输入从 4102 降到 2811 tokens，成本降三成。
+Interrupted generations and repairable JSON endings are retried. Every returned workspace is validated against the live Herdr layout before names are applied. A workspace that remains malformed is skipped while valid workspaces continue.
 
-## 会话信号提取
-
-喂给模型的不是整段终端内容，而是每个 Pane 的三行信号：上一句用户诉求（`PREV`）、
-当前用户诉求（`ASK`，完整保留）、Agent 最新一句回复（`DID`）。Agent 的思考过程、
-工具调用和工具结果都不进入输入。
-
-被过滤掉的「假用户消息」包括 hook 反馈、`<task-notification>`、slash command 包装、
-compact 摘要、粘贴的表格边框和 `key=value` 配置输出——实测这类内容占原先「用户消息」
-的 23%。长粘贴保留尾部，因为真正的诉求通常写在粘贴内容之后。没有 Agent 会话的
-shell Pane 走终端截屏压缩，去掉进度条和分隔线后只保留有字的行。
-
-实测 23 个 Workspace：输入从 4915 tokens 降到 3556，Pane 名称更贴近当前动作。
-
-## 请求日志
-
-每次模型请求都会写入 `~/.local/share/herdr-autoname/requests.db`（SQLite，只保留
-最近 200 条），记录模型、HTTP 状态、finish_reason、token 数、完整的请求输入和原始
-响应。命名失败时错误信息会直接给出记录 ID，用 `herdr-autoname log <ID>` 就能看到
-模型当时到底返回了什么。
-
-上游偶尔会返回 HTTP 200 但生成中断（`finish_reason` 不是 `stop`），也可能吐出少一个
-右括号的 JSON。前者自动重试最多 3 次，后者会先尝试补齐括号再解析，补齐结果仍要通过
-数量校验才会应用。
-
-模型偶尔还会把某一个 Workspace 写坏——少一层名称、Tab 数量对不上、Pane 名称超宽。
-这类结构错误现在按 Workspace 单独处理：先整批重试（最多 3 次），仍然写坏就只跳过那
-一个 Workspace（保留它的原名），其余 Workspace 照常写入，结束时用 ⚠️ 列出被跳过的
-ID 和日志记录 ID，退出码为 2。整批失败（配额、鉴权）依旧直接报错退出。
-
-每次命名或运行 `herdr-autoname configure` 时，还会按当前项目稳定分组 Workspace。
-同一项目保持连续，组内维持原顺序。SSH Pane 会根据终端标题识别远程主机，Sidebar
-第二行改为 `SSH · 主机名`，不会继续显示切换前的本地目录和 Git 分支。
-每个项目组只在第一个 Workspace 显示项目、分支和 Git 状态，组间在预览中留出空行。
-Pane 名称使用“动词 + 对象”，不生成重复、含糊的“把……好”句式。
-
-## 输出
-
-运行前会展示：
-
-- Workspace 名称
-- 当前路径和 Git 状态
-- Agent 类型和运行状态
-- 最后一次用户输入
-
-运行后会用表格展示新的 Workspace、Tab 和 Pane 名称，并给出请求耗时、token 和成本。
-
-## 开发
+## Development
 
 ```bash
-python3 -m py_compile scripts/rename_workspaces.py
+python3 -m unittest discover -s tests -v
+python3 -m py_compile scripts/*.py
 uv build
 ```
 
