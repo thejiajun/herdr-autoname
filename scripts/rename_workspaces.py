@@ -22,7 +22,14 @@ DIRECT_BASE = "https://api.deepseek.com"
 DIRECT_MODEL = "deepseek-chat"
 PIKA_BASE = "https://api.dev.pika.art"
 PIKA_MODEL = "google/gemini-3.7-flash"
-AUTONAME_ENV = os.path.expanduser("~/.config/herdr/autoname.env")
+PLUGIN_CONFIG_DIR = os.environ.get("HERDR_PLUGIN_CONFIG_DIR", "").strip()
+PLUGIN_STATE_DIR = os.environ.get("HERDR_PLUGIN_STATE_DIR", "").strip()
+LEGACY_AUTONAME_ENV = os.path.expanduser("~/.config/herdr/autoname.env")
+AUTONAME_ENV = (
+    os.path.join(PLUGIN_CONFIG_DIR, "autoname.env")
+    if PLUGIN_CONFIG_DIR else LEGACY_AUTONAME_ENV
+)
+HERDR_BIN = os.environ.get("HERDR_BIN_PATH", "herdr").strip() or "herdr"
 MAX_PANE_CHARS = 1_200
 # Budgets per pane, measured against real sessions: the current ask earns the
 # most room, the previous one only frames it, and the reply only has to say
@@ -49,8 +56,14 @@ HANDOFF_TIMEOUT = 180
 PANE_MAX_DISPLAY_WIDTH = 28
 DEEPSEEK_WORKSPACES_PER_REQUEST = 3
 DEFAULT_WORKSPACES_PER_REQUEST = 30
-REQUEST_LOG_DB = os.path.expanduser("~/.local/share/herdr-autoname/requests.db")
-PROVIDER_CACHE = os.path.expanduser("~/.local/share/herdr-autoname/providers.json")
+REQUEST_LOG_DB = (
+    os.path.join(PLUGIN_STATE_DIR, "requests.db")
+    if PLUGIN_STATE_DIR else os.path.expanduser("~/.local/share/herdr-autoname/requests.db")
+)
+PROVIDER_CACHE = (
+    os.path.join(PLUGIN_STATE_DIR, "providers.json")
+    if PLUGIN_STATE_DIR else os.path.expanduser("~/.local/share/herdr-autoname/providers.json")
+)
 REQUEST_LOG_KEEP = 200
 LLM_MAX_ATTEMPTS = 3
 LLM_RETRY_BACKOFF = 1.5
@@ -99,7 +112,9 @@ PROVIDER_LABELS = {
     **{name: spec["label"] for name, spec in HTTP_PROVIDERS.items()},
     **{name: spec["label"] for name, spec in CLI_PROVIDERS.items()},
 }
-HERDR_CONFIG = os.path.expanduser("~/.config/herdr/config.toml")
+HERDR_CONFIG = os.path.expanduser(
+    os.environ.get("HERDR_CONFIG_PATH", "~/.config/herdr/config.toml")
+)
 SIDEBAR_ROWS = {
     "ui.sidebar.spaces": (
         'rows = [["state_icon", { token = "$workspace_label", bold = true }], '
@@ -128,6 +143,10 @@ SYSTEM_PROMPT = """给 Herdr 工作空间命名。输入：{"w":[{"n":"当前wor
 
 
 def run(args, timeout=120, allow_handoff=True):
+    args = list(args)
+    is_herdr = args[:1] == ["herdr"] or args[:1] == [HERDR_BIN]
+    if args[:1] == ["herdr"]:
+        args[0] = HERDR_BIN
     try:
         proc = subprocess.run(
             args, capture_output=True, text=True, timeout=timeout, check=False
@@ -136,7 +155,7 @@ def run(args, timeout=120, allow_handoff=True):
         return 1, "", str(exc)
     code = proc.returncode
     stdout, stderr = proc.stdout.strip(), proc.stderr.strip()
-    if code != 0 and allow_handoff and args[:1] == ["herdr"]:
+    if code != 0 and allow_handoff and is_herdr:
         if hand_off_stale_server(f"{stderr}\n{stdout}"):
             return run(args, timeout=timeout, allow_handoff=False)
     return code, stdout, stderr
@@ -352,6 +371,17 @@ def codex_message(row):
 
 
 def native_session_content(pane):
+    messages = native_session_messages(pane)
+    if messages is None:
+        return None
+    return {
+        "recent_content": recent_signals(messages),
+        "last_user_input": last_user_input(messages),
+    }
+
+
+def native_session_messages(pane):
+    """Return normalized native turns for event-driven consumers as well as naming."""
     session = pane.get("agent_session") or {}
     session_id = session.get("value")
     agent = session.get("agent") or pane.get("agent")
@@ -369,10 +399,7 @@ def native_session_content(pane):
         )
     else:
         return None
-    return {
-        "recent_content": recent_signals(messages),
-        "last_user_input": last_user_input(messages),
-    }
+    return messages
 
 
 def read_pane(pane):
@@ -696,10 +723,9 @@ def env_value(name, env_file=None):
     value = os.environ.get(name, "").strip()
     if value:
         return value
-    paths = [env_file] if env_file else [
-        os.path.join(os.getcwd(), ".env"),
-        os.path.expanduser("~/.config/herdr/autoname.env"),
-    ]
+    paths = [env_file] if env_file else [os.path.join(os.getcwd(), ".env"), AUTONAME_ENV]
+    if AUTONAME_ENV != LEGACY_AUTONAME_ENV:
+        paths.append(LEGACY_AUTONAME_ENV)
     for path in paths:
         if not path or not os.path.isfile(path):
             continue

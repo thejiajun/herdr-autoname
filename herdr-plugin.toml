@@ -1,0 +1,20 @@
+id = "thejiajun.autoname"
+name = "Herdr Autoname"
+version = "0.14.0"
+min_herdr_version = "0.9.0"
+description = "Rename Herdr workspaces after a configurable number of agent conversations."
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "rename-now"
+title = "Rename workspaces now"
+command = ["python3", "scripts/rename_workspaces.py"]
+
+[[actions]]
+id = "preview"
+title = "Preview current workspaces"
+command = ["python3", "scripts/rename_workspaces.py", "--dry-run"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "scripts/plugin_event.py"]

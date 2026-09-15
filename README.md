@@ -14,6 +14,7 @@
 - SSH 会话显示 `SSH · 主机名`，不沿用切换前的本地项目目录
 - `--dry-run` 无需 API Key，不调用模型、不修改名称；宽终端用粗体双栏预览 Herdr Sidebar，窄终端自动改为上下排列
 - 仅依赖 Python 标准库
+- 可作为 Herdr Plugin 安装：手动 Action，或每个 Pane 累计 N 条新对话后自动命名
 
 ## 前提
 
@@ -22,6 +23,54 @@
 - 可使用 `PIKA_CHAT_API_KEY`、`DEEPSEEK_API_KEY`，或本机已登录的 Codex/Claude CLI
 
 ## 安装
+
+### Herdr Plugin（推荐）
+
+Herdr 0.9.0 及以上可以直接从 GitHub 安装：
+
+```bash
+herdr plugin install thejiajun/herdr-autoname
+```
+
+插件默认启用两种入口：
+
+- `rename-now` Action：立即运行一次命名
+- `preview` Action：不调用模型、不修改名称，预览当前 Workspace
+- `pane.agent_status_changed` Event：Agent 完成一轮后检查；同一 Pane 每累计 3 条新用户消息触发一次
+
+修改自动触发间隔：
+
+```bash
+config_dir="$(herdr plugin config-dir thejiajun.autoname)"
+printf 'HERDR_AUTONAME_TRIGGER_EVERY=5\n' > "$config_dir/autoname.env"
+```
+
+设为 `1` 表示每轮触发。临时关闭自动触发但保留手动 Action：
+
+```bash
+config_dir="$(herdr plugin config-dir thejiajun.autoname)"
+printf 'HERDR_AUTONAME_ENABLED=false\n' >> "$config_dir/autoname.env"
+```
+
+Provider、模型和 API Key 也写入这个 `autoname.env`。插件请求日志和每个 Pane 的
+对话计数保存在 Herdr 分配的 Plugin State 目录，不写入仓库。第一次观察 Session 时会把
+刚完成的一轮记为第 1 条，但不会把安装插件以前的历史对话全部算进去。
+
+手动执行及查看日志：
+
+```bash
+herdr plugin action invoke thejiajun.autoname.rename-now
+herdr plugin action invoke thejiajun.autoname.preview
+herdr plugin log list --plugin thejiajun.autoname
+```
+
+本地开发使用：
+
+```bash
+herdr plugin link /path/to/herdr-autoname
+```
+
+### 独立 CLI
 
 推荐使用 `uv`：
 
