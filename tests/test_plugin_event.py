@@ -21,6 +21,18 @@ class PluginEventTests(unittest.TestCase):
     def test_missing_previous_turn_counts_current_turn(self):
         self.assertEqual(plugin_event.new_turn_count(["b"], "a"), 1)
 
+    def test_new_session_is_named_after_first_turn(self):
+        self.assertTrue(plugin_event.should_name({"pending_turns": 1, "named": False}, 3))
+
+    def test_named_session_waits_for_interval(self):
+        entry = {"pending_turns": 2, "named": True}
+        self.assertFalse(plugin_event.should_name(entry, 3))
+        entry["pending_turns"] = 3
+        self.assertTrue(plugin_event.should_name(entry, 3))
+
+    def test_no_new_turn_does_not_name(self):
+        self.assertFalse(plugin_event.should_name({"pending_turns": 0, "named": False}, 3))
+
     def test_filters_injected_user_turns(self):
         messages = [
             ("user", "<task-notification>done"),

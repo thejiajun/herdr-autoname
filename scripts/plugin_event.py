@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Trigger autonaming after every N completed user turns in a Herdr pane."""
+"""Name a Herdr pane after its first completed turn, then every N turns."""
 
 import fcntl
 import hashlib
@@ -99,6 +99,12 @@ def new_turn_count(fingerprints, previous):
     return max(0, len(fingerprints) - index - 1)
 
 
+def should_name(entry, threshold):
+    """A new session is named after its first turn, then refreshed every N turns."""
+    pending = int(entry.get("pending_turns", 0))
+    return pending > 0 and (not entry.get("named") or pending >= threshold)
+
+
 def pane_from_snapshot(pane_id):
     state = autoname.snapshot()
     return next((pane for pane in state.get("panes", []) if pane.get("pane_id") == pane_id), None)
@@ -145,6 +151,7 @@ def main():
         if previous.get("session_id") != session_id:
             previous = {
                 "session_id": session_id,
+                "named": False,
                 "last_user_turn": fingerprints[-1],
                 # This hook runs at the end of a real turn. Count that turn,
                 # while using only its latest fingerprint as the baseline for
@@ -161,7 +168,7 @@ def main():
                 "pending_turns": pending,
             })
         panes[pane_id] = previous
-        if pending < threshold:
+        if not should_name(previous, threshold):
             save_state(state_path, state)
             return 0
 
@@ -169,7 +176,9 @@ def main():
         # twice or overwrite one another's counters.
         code = invoke_autoname(workspace_id)
         if code == 0:
-            previous["pending_turns"] = pending % threshold
+            first = not previous.get("named")
+            previous["pending_turns"] = 0 if first else pending % threshold
+            previous["named"] = True
         save_state(state_path, state)
         return code
 

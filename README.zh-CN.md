@@ -7,7 +7,7 @@
 ## 核心功能
 
 - 原生 Herdr Plugin，带交互式设置 Popup。
-- 每个 Pane 累计 N 条用户对话后自动重命名，默认 N=3。
+- 新的 Agent 会话完成第 1 条对话就自动命名，之后每个 Pane 累计 N 条对话刷新一次，默认 N=3。
 - 读取 OpenCode、Claude Code 和 Codex 原生 Session。
 - 支持 Pika、OpenRouter、DeepSeek、Pi、Claude、Codex、Gemini、Cursor 和 Grok。
 - 识别 SSH、常见前台工具和空闲 Shell，这些情况不调用模型。
@@ -42,7 +42,7 @@ herdr plugin action invoke thejiajun.autoname.open-settings
 - `preview`：只读预览，不调用模型、不修改名称
 - `rename-now`：立即执行重命名
 
-自动触发监听 `pane.agent_status_changed`。安装后首次观察到的已完成对话记为第 1 条，但不会把安装前的所有历史对话计入。
+自动触发监听 `pane.agent_status_changed`。新观察到的会话在第 1 条用户对话完成后立即命名，之后每累计 N 条再刷新；安装前的历史对话不计入。
 
 查看配置目录和运行日志：
 

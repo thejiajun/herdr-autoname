@@ -7,7 +7,7 @@ Automatically rename Herdr workspaces, tabs, and panes from the latest real conv
 ## Highlights
 
 - Runs as a native Herdr Plugin with an interactive Settings Popup.
-- Automatically renames after every configurable number of user conversations per pane.
+- Names a new agent session after its first completed conversation, then refreshes every configurable number of conversations per pane.
 - Reads native OpenCode, Claude Code, and Codex sessions.
 - Uses the latest two user requests and the latest agent conclusion instead of raw terminal noise.
 - Supports Pika, OpenRouter, DeepSeek, Pi, Claude, Codex, Gemini, Cursor, and Grok providers.
@@ -44,7 +44,7 @@ herdr plugin action invoke thejiajun.autoname.open-settings
 
 The Popup lets you select a provider and model, change the conversation interval, enable or disable automatic naming, preview the Sidebar, and run a rename immediately.
 
-The default interval is 3 completed user conversations per pane. The first completed turn observed after installation counts as turn 1; older history is not counted.
+A newly observed session is named as soon as its first user conversation completes. After that, names refresh every 3 completed user conversations per pane by default. History from before installation is not counted.
 
 Plugin configuration is stored in Herdr's isolated config directory:
 
