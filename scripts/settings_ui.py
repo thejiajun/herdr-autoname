@@ -12,6 +12,46 @@ import rename_workspaces as autoname
 
 DEFAULT_INTERVAL = 3
 MENU = ("provider", "model", "interval", "enabled", "preview", "rename", "save", "cancel")
+STYLES = {}
+
+
+def init_colors():
+    """Set a readable palette while keeping a monochrome-terminal fallback."""
+    global STYLES
+    STYLES = {
+        "body": curses.A_NORMAL,
+        "title": curses.A_BOLD,
+        "section": curses.A_BOLD,
+        "muted": curses.A_NORMAL,
+        "selected": curses.A_REVERSE | curses.A_BOLD,
+        "action": curses.A_BOLD,
+        "success": curses.A_BOLD,
+    }
+    if not curses.has_colors():
+        return
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+        pairs = {
+            1: (curses.COLOR_CYAN, -1),
+            2: (curses.COLOR_BLACK, curses.COLOR_CYAN),
+            3: (curses.COLOR_YELLOW, -1),
+            4: (curses.COLOR_GREEN, -1),
+        }
+        for number, (foreground, background) in pairs.items():
+            curses.init_pair(number, foreground, background)
+        STYLES.update(
+            {
+                "title": curses.color_pair(1) | curses.A_BOLD,
+                "section": curses.color_pair(1) | curses.A_BOLD,
+                "selected": curses.color_pair(2) | curses.A_BOLD,
+                "action": curses.color_pair(3) | curses.A_BOLD,
+                "success": curses.color_pair(4) | curses.A_BOLD,
+            }
+        )
+    except curses.error:
+        # Some minimal TERM definitions report colors but reject init_pair.
+        return
 
 
 def load_settings():
@@ -121,16 +161,16 @@ def show_scroll_view(stdscr, title, lines):
     while True:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
-        add(stdscr, 1, 2, title, curses.A_BOLD)
-        add(stdscr, 2, 2, f"{len(lines)} rows · read-only", curses.A_DIM)
+        add(stdscr, 1, 2, title, STYLES.get("title", curses.A_BOLD))
+        add(stdscr, 2, 2, f"{len(lines)} rows · read-only", STYLES.get("muted", 0))
         viewport = max(1, height - 6)
         maximum = max(0, len(lines) - viewport)
         offset = min(offset, maximum)
         for index, line in enumerate(lines[offset:offset + viewport]):
-            style = curses.A_BOLD if line and not line.startswith(" ") else 0
+            style = STYLES.get("section", curses.A_BOLD) if line and not line.startswith(" ") else STYLES.get("body", 0)
             add(stdscr, 4 + index, 2, line, style)
         footer = f"↑↓ Scroll  PgUp/PgDn  Esc Back     {offset + 1}-{min(len(lines), offset + viewport)} of {len(lines)}"
-        add(stdscr, height - 1, 2, footer, curses.A_DIM)
+        add(stdscr, height - 1, 2, footer, STYLES.get("muted", 0))
         stdscr.refresh()
         key = stdscr.getch()
         if key in (27, ord("q"), ord("Q"), curses.KEY_LEFT):
@@ -148,10 +188,10 @@ def show_scroll_view(stdscr, title, lines):
 def draw(stdscr, settings, providers, selected, message):
     stdscr.erase()
     height, width = stdscr.getmaxyx()
-    add(stdscr, 1, 2, "Herdr Autoname", curses.A_BOLD)
-    add(stdscr, 2, 2, "Automatically rename workspaces from conversation activity.", curses.A_DIM)
+    add(stdscr, 1, 2, "Herdr Autoname", STYLES.get("title", curses.A_BOLD))
+    add(stdscr, 2, 2, "Automatically rename workspaces from conversation activity.", STYLES.get("muted", 0))
     if width < 50 or height < 18:
-        add(stdscr, 5, 2, "Popup is too small. Use at least 50×18.", curses.A_BOLD)
+        add(stdscr, 5, 2, "Popup is too small. Use at least 50×18.", STYLES.get("title", curses.A_BOLD))
         stdscr.refresh()
         return
     provider_label = autoname.PROVIDER_LABELS.get(settings["provider"], settings["provider"])
@@ -163,26 +203,32 @@ def draw(stdscr, settings, providers, selected, message):
         (9, "Auto rename", "[x] Enabled" if settings["enabled"] else "[ ] Disabled"),
         (14, "Preview Sidebar", "›"),
         (15, "Rename now", "›"),
-        (18, "Save changes", ""),
-        (19, "Cancel", ""),
+        (17, "Save changes", ""),
+        (18, "Cancel", ""),
     ]
-    add(stdscr, 4, 3, "MODEL", curses.A_DIM | curses.A_BOLD)
-    add(stdscr, 8, 3, "AUTOMATION", curses.A_DIM | curses.A_BOLD)
-    add(stdscr, 13, 3, "ACTIONS", curses.A_DIM | curses.A_BOLD)
+    add(stdscr, 4, 3, "MODEL", STYLES.get("section", curses.A_BOLD))
+    add(stdscr, 8, 3, "AUTOMATION", STYLES.get("section", curses.A_BOLD))
+    add(stdscr, 13, 3, "ACTIONS", STYLES.get("section", curses.A_BOLD))
     for index, (row, label, value) in enumerate(rows):
         marker = ">" if index == selected else " "
-        style = curses.A_BOLD if index == selected else 0
+        if index == selected:
+            style = STYLES.get("selected", curses.A_REVERSE | curses.A_BOLD)
+        elif index in (4, 5):
+            style = STYLES.get("action", curses.A_BOLD)
+        else:
+            style = STYLES.get("body", 0)
         label_cell = fit(label, 18)
         label_cell += " " * max(0, 18 - autoname.display_width(label_cell))
         add(stdscr, row, 3, f"{marker} {label_cell}{value}", style)
-    add(stdscr, height - 2, 2, fit(message, max(1, width - 4)), curses.A_DIM)
-    add(stdscr, height - 1, 2, "↑↓ Move  ←→ Change  Enter Select  S Save  Esc Close", curses.A_DIM)
+    add(stdscr, height - 2, 2, fit(message, max(1, width - 4)), STYLES.get("muted", 0))
+    add(stdscr, height - 1, 2, "↑↓ Move  ←→ Change  Enter Select  S Save  Esc Close", STYLES.get("muted", 0))
     stdscr.refresh()
 
 
 def ui(stdscr):
     curses.curs_set(0)
     stdscr.keypad(True)
+    init_colors()
     settings = load_settings()
     providers = available_providers()
     if settings["provider"] not in providers:

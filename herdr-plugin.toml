@@ -25,7 +25,7 @@ id = "settings"
 title = "Autoname Settings"
 placement = "popup"
 width = 72
-height = 24
+height = 22
 command = ["python3", "scripts/settings_ui.py"]
 
 [[events]]
