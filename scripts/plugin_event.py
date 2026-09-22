@@ -50,9 +50,7 @@ def enabled():
 
 
 def state_paths():
-    root = os.environ.get("HERDR_PLUGIN_STATE_DIR", "").strip()
-    if not root:
-        root = os.path.expanduser("~/.local/share/herdr-autoname/plugin")
+    root = os.path.join(autoname.STATE_DIR, "plugin")
     os.makedirs(root, exist_ok=True)
     return os.path.join(root, "turns.json"), os.path.join(root, "turns.lock")
 
@@ -117,6 +115,7 @@ def invoke_autoname(workspace_id):
 
 
 def main():
+    autoname.migrate_plugin_settings()
     if not enabled():
         return 0
     event = read_json_env("HERDR_PLUGIN_EVENT_JSON")

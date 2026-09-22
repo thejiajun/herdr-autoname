@@ -46,13 +46,9 @@ The Popup lets you select a provider and model, change the conversation interval
 
 A newly observed session is named as soon as its first user conversation completes. After that, names refresh every 3 completed user conversations per pane by default. History from before installation is not counted.
 
-Plugin configuration is stored in Herdr's isolated config directory:
+The plugin and the standalone CLI share one settings file, `~/.config/herdr/autoname.env`, so a provider or model chosen in the Popup or with `herdr-autoname provider` / `model` applies to both. Settings saved by plugin 0.16.0 in Herdr's per-plugin config directory are moved into this file on the next run.
 
-```bash
-herdr plugin config-dir thejiajun.autoname
-```
-
-Plugin counters, provider cache, and request logs are stored in Herdr's isolated plugin state directory. They are never written into the repository.
+Conversation counters, provider cache, and request logs live in `~/.local/share/herdr-autoname/`, so `herdr-autoname log` also shows requests made by the plugin. None of this is written into the repository.
 
 ### Manual actions
 

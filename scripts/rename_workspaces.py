@@ -22,13 +22,12 @@ DIRECT_BASE = "https://api.deepseek.com"
 DIRECT_MODEL = "deepseek-chat"
 PIKA_BASE = "https://api.dev.pika.art"
 PIKA_MODEL = "google/gemini-3.7-flash"
+# The CLI and the Herdr plugin share one settings file and one state directory,
+# so a provider or model chosen in either place applies to both.
+AUTONAME_ENV = os.path.expanduser("~/.config/herdr/autoname.env")
+STATE_DIR = os.path.expanduser("~/.local/share/herdr-autoname")
+# Plugin 0.16.0 kept its settings in Herdr's per-plugin config directory.
 PLUGIN_CONFIG_DIR = os.environ.get("HERDR_PLUGIN_CONFIG_DIR", "").strip()
-PLUGIN_STATE_DIR = os.environ.get("HERDR_PLUGIN_STATE_DIR", "").strip()
-LEGACY_AUTONAME_ENV = os.path.expanduser("~/.config/herdr/autoname.env")
-AUTONAME_ENV = (
-    os.path.join(PLUGIN_CONFIG_DIR, "autoname.env")
-    if PLUGIN_CONFIG_DIR else LEGACY_AUTONAME_ENV
-)
 HERDR_BIN = os.environ.get("HERDR_BIN_PATH", "herdr").strip() or "herdr"
 MAX_PANE_CHARS = 1_200
 # Budgets per pane, measured against real sessions: the current ask earns the
@@ -56,14 +55,8 @@ HANDOFF_TIMEOUT = 180
 PANE_MAX_DISPLAY_WIDTH = 28
 DEEPSEEK_WORKSPACES_PER_REQUEST = 3
 DEFAULT_WORKSPACES_PER_REQUEST = 30
-REQUEST_LOG_DB = (
-    os.path.join(PLUGIN_STATE_DIR, "requests.db")
-    if PLUGIN_STATE_DIR else os.path.expanduser("~/.local/share/herdr-autoname/requests.db")
-)
-PROVIDER_CACHE = (
-    os.path.join(PLUGIN_STATE_DIR, "providers.json")
-    if PLUGIN_STATE_DIR else os.path.expanduser("~/.local/share/herdr-autoname/providers.json")
-)
+REQUEST_LOG_DB = os.path.join(STATE_DIR, "requests.db")
+PROVIDER_CACHE = os.path.join(STATE_DIR, "providers.json")
 REQUEST_LOG_KEEP = 200
 LLM_MAX_ATTEMPTS = 3
 LLM_RETRY_BACKOFF = 1.5
@@ -724,19 +717,41 @@ def env_value(name, env_file=None):
     if value:
         return value
     paths = [env_file] if env_file else [os.path.join(os.getcwd(), ".env"), AUTONAME_ENV]
-    if AUTONAME_ENV != LEGACY_AUTONAME_ENV:
-        paths.append(LEGACY_AUTONAME_ENV)
     for path in paths:
-        if not path or not os.path.isfile(path):
-            continue
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                if line.lstrip().startswith("#") or "=" not in line:
-                    continue
-                key, candidate = line.split("=", 1)
-                if key.strip() == name:
-                    return candidate.strip().strip("'\"")
+        value = read_env_file(path).get(name, "")
+        if value:
+            return value
     return ""
+
+
+def read_env_file(path):
+    values = {}
+    if not path or not os.path.isfile(path):
+        return values
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if line.lstrip().startswith("#") or "=" not in line:
+                continue
+            key, candidate = line.split("=", 1)
+            values.setdefault(key.strip(), candidate.strip().strip("'\""))
+    return values
+
+
+def migrate_plugin_settings(plugin_config_dir=PLUGIN_CONFIG_DIR, target=AUTONAME_ENV):
+    """Fold settings saved by plugin 0.16.0 into the shared file, once."""
+    if not plugin_config_dir:
+        return False
+    source = os.path.join(plugin_config_dir, "autoname.env")
+    old_values = read_env_file(source)
+    if not old_values:
+        return False
+    current = read_env_file(target)
+    # The plugin popup was the last place these were edited, so its values win.
+    for name, value in old_values.items():
+        if value and current.get(name) != value:
+            set_env_value(target, name, value)
+    os.replace(source, source + ".migrated")
+    return True
 
 
 def set_env_value(path, name, value):
@@ -2121,6 +2136,7 @@ def print_session_preview(rows, detailed=False):
 
 
 def main():
+    migrate_plugin_settings()
     parser = argparse.ArgumentParser(
         prog="herdr-autoname",
         description="读取当前 Herdr 会话内容，用 LLM 批量更新 Workspace、Tab 和 Pane 名称。",

@@ -244,6 +244,7 @@ def ui(stdscr):
 def main():
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise RuntimeError("Settings must run inside a Herdr Popup TTY")
+    autoname.migrate_plugin_settings()
     return curses.wrapper(ui)
 
 

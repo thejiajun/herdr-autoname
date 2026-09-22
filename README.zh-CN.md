@@ -44,14 +44,15 @@ herdr plugin action invoke thejiajun.autoname.open-settings
 
 自动触发监听 `pane.agent_status_changed`。新观察到的会话在第 1 条用户对话完成后立即命名，之后每累计 N 条再刷新；安装前的历史对话不计入。
 
-查看配置目录和运行日志：
+查看运行日志：
 
 ```bash
-herdr plugin config-dir thejiajun.autoname
 herdr plugin log list --plugin thejiajun.autoname
 ```
 
-配置、对话计数、Provider 缓存和请求日志使用 Herdr 分配的 Plugin Config/State 目录，不写入仓库。
+Plugin 和独立 CLI 共用同一个设置文件 `~/.config/herdr/autoname.env`：在 Popup 里改，或用 `herdr-autoname provider` / `model` 改，两边同时生效。0.16.0 版 Plugin 存在 Herdr 插件配置目录里的设置，会在下次运行时自动合并到这个文件。
+
+对话计数、Provider 缓存和请求日志统一放在 `~/.local/share/herdr-autoname/`，所以 `herdr-autoname log` 也能看到 Plugin 发出的请求。这些都不写入仓库。
 
 ## 作为独立 CLI 安装
 
