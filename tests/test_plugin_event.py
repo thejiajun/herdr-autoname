@@ -68,5 +68,41 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("HERDR_AUTONAME_ENABLED=true", saved)
 
 
+
+class SharedSettingsTests(unittest.TestCase):
+    def test_plugin_values_move_into_shared_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plugin_dir = os.path.join(directory, "plugin")
+            os.makedirs(plugin_dir)
+            source = os.path.join(plugin_dir, "autoname.env")
+            target = os.path.join(directory, "autoname.env")
+            with open(source, "w", encoding="utf-8") as handle:
+                handle.write("HERDR_AUTONAME_PROVIDER=pi\nHERDR_AUTONAME_TRIGGER_EVERY=5\n")
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write("HERDR_AUTONAME_PROVIDER=codex\nOPENROUTER_API_KEY=keep\n")
+
+            self.assertTrue(plugin_event.autoname.migrate_plugin_settings(plugin_dir, target))
+
+            values = plugin_event.autoname.read_env_file(target)
+            self.assertEqual(values["HERDR_AUTONAME_PROVIDER"], "pi")
+            self.assertEqual(values["HERDR_AUTONAME_TRIGGER_EVERY"], "5")
+            self.assertEqual(values["OPENROUTER_API_KEY"], "keep")
+            self.assertFalse(os.path.exists(source))
+            self.assertTrue(os.path.exists(source + ".migrated"))
+            self.assertFalse(plugin_event.autoname.migrate_plugin_settings(plugin_dir, target))
+
+    def test_without_plugin_settings_nothing_moves(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = os.path.join(directory, "autoname.env")
+            self.assertFalse(plugin_event.autoname.migrate_plugin_settings("", target))
+            self.assertFalse(plugin_event.autoname.migrate_plugin_settings(directory, target))
+            self.assertFalse(os.path.exists(target))
+
+    def test_cli_and_plugin_resolve_same_paths(self):
+        autoname = plugin_event.autoname
+        self.assertEqual(autoname.AUTONAME_ENV, os.path.expanduser("~/.config/herdr/autoname.env"))
+        self.assertTrue(autoname.REQUEST_LOG_DB.startswith(autoname.STATE_DIR))
+
+
 if __name__ == "__main__":
     unittest.main()
