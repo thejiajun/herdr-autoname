@@ -642,7 +642,7 @@ def workspace_location(workspace_id, panes, process_infos=None):
     }
 
 
-def collect(only_workspaces=None):
+def collect(only_workspaces=None, with_content=True):
     state = snapshot()
     wanted = set(only_workspaces or [])
     all_workspace_ids = {item["workspace_id"] for item in state.get("workspaces", [])}
@@ -658,8 +658,12 @@ def collect(only_workspaces=None):
     workspace_ids = {item["workspace_id"] for item in workspaces}
     tabs = [item for item in state.get("tabs", []) if item["workspace_id"] in workspace_ids]
     panes = [item for item in state.get("panes", []) if item["workspace_id"] in workspace_ids]
-    with ThreadPoolExecutor(max_workers=min(12, max(1, len(panes)))) as pool:
-        contents = dict(zip((p["pane_id"] for p in panes), pool.map(read_pane, panes)))
+    empty = {"recent_content": "", "last_user_input": ""}
+    if with_content:
+        with ThreadPoolExecutor(max_workers=min(12, max(1, len(panes)))) as pool:
+            contents = dict(zip((p["pane_id"] for p in panes), pool.map(read_pane, panes)))
+    else:
+        contents = {p["pane_id"]: empty for p in panes}
     with ThreadPoolExecutor(max_workers=min(12, max(1, len(panes)))) as pool:
         process_infos = dict(zip(
             (p["pane_id"] for p in panes), pool.map(read_process_info, panes)
@@ -1837,6 +1841,12 @@ def sync_project_metadata(rows, names=None):
     return updated
 
 
+def sidebar_rows(rows, partial):
+    """Grouping and per-group context depend on every workspace, so a run that
+    names only some of them still lays out the whole Sidebar."""
+    return collect(with_content=False)[0] if partial else rows
+
+
 def sidebar_context(row):
     context = row["project"]
     if context and not row["remote_host"] and row["git_status"] != "—":
@@ -2204,6 +2214,18 @@ def main():
         config = provider_config(args)
         print_provider_detection(config, available, initialized)
 
+    if args.command in ("configure", "projects"):
+        rows, _ = collect(with_content=False)
+        changed, updated = configure_sidebar(rows)
+        grouped, _ = group_workspaces(rows)
+        action = "已更新" if changed else "已确认"
+        print(
+            f"✓ {action}侧边栏布局，刷新 {updated} 个 Workspace 标签"
+            f"，项目分组{'已更新' if grouped else '无需调整'}。",
+            file=sys.stderr,
+        )
+        return 0
+
     print("正在读取 Herdr 会话...", file=sys.stderr, flush=True)
     rows, before_ids = collect(args.workspace)
     if not rows:
@@ -2234,18 +2256,9 @@ def main():
                 print("\n详细名称：")
                 print_result_table(names, rows, detailed=True)
         return 0
-    if args.command in ("configure", "projects"):
-        changed, updated = configure_sidebar(rows)
-        grouped, _ = group_workspaces(rows)
-        action = "已更新" if changed else "已确认"
-        print(
-            f"✓ {action}侧边栏布局，刷新 {updated} 个 Workspace 标签"
-            f"，项目分组{'已更新' if grouped else '无需调整'}。",
-            file=sys.stderr,
-        )
-        return 0
+    partial = bool(args.workspace)
     if not args.dry_run:
-        changed, updated = configure_sidebar(rows)
+        changed, updated = configure_sidebar(sidebar_rows(rows, partial))
         action = "已更新" if changed else "已确认"
         print(
             f"✓ {action}侧边栏布局，并刷新 {updated} 个 Workspace 标签。",
@@ -2289,8 +2302,9 @@ def main():
     do_apply = True
     print("正在写入 Workspace、Tab 和 Pane 名称...", file=sys.stderr, flush=True)
     mutations = apply_names(names)
-    sync_project_metadata(rows, names)
-    grouped, workspace_order = group_workspaces(rows)
+    layout = sidebar_rows(rows, partial)
+    sync_project_metadata(layout, names)
+    grouped, workspace_order = group_workspaces(layout)
     after_ids = current_workspace_ids()
     output = {
         "mode": "apply" if do_apply else "dry-run",

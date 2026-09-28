@@ -41,6 +41,32 @@ class PluginEventTests(unittest.TestCase):
         ]
         self.assertEqual(len(plugin_event.user_turn_fingerprints(messages)), 1)
 
+    def test_workspace_without_label_token_needs_sidebar_label(self):
+        self.assertTrue(plugin_event.needs_sidebar_label({"workspace_id": "w1"}))
+        self.assertTrue(plugin_event.needs_sidebar_label({"tokens": {"context": "repo"}}))
+        self.assertFalse(plugin_event.needs_sidebar_label({"tokens": {"workspace_label": "[a]"}}))
+        self.assertFalse(plugin_event.needs_sidebar_label(None))
+
+
+class SidebarLayoutTests(unittest.TestCase):
+    def test_partial_run_lays_out_every_workspace(self):
+        everything = [{"workspace_id": "w1"}, {"workspace_id": "w2"}]
+        with mock.patch.object(plugin_event.autoname, "collect", return_value=(everything, set())) as collect:
+            self.assertEqual(plugin_event.autoname.sidebar_rows([everything[1]], True), everything)
+        collect.assert_called_once_with(with_content=False)
+
+    def test_full_run_reuses_its_rows(self):
+        rows = [{"workspace_id": "w1"}]
+        self.assertIs(plugin_event.autoname.sidebar_rows(rows, False), rows)
+
+    def test_groups_same_project_together(self):
+        rows = [
+            {"workspace_id": "a1", "group_key": "path:/a"},
+            {"workspace_id": "b1", "group_key": "path:/b"},
+            {"workspace_id": "a2", "group_key": "path:/a"},
+        ]
+        self.assertEqual(plugin_event.autoname.grouped_workspace_ids(rows), ["a1", "a2", "b1"])
+
 
 class SettingsTests(unittest.TestCase):
     def test_fit_truncates_long_values(self):

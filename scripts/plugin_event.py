@@ -103,15 +103,18 @@ def should_name(entry, threshold):
     return pending > 0 and (not entry.get("named") or pending >= threshold)
 
 
-def pane_from_snapshot(pane_id):
-    state = autoname.snapshot()
-    return next((pane for pane in state.get("panes", []) if pane.get("pane_id") == pane_id), None)
+def find(items, key, value):
+    return next((item for item in items if item.get(key) == value), None)
 
 
-def invoke_autoname(workspace_id):
+def needs_sidebar_label(workspace):
+    """A workspace without our label token shows a blank title in the Sidebar."""
+    return bool(workspace) and not (workspace.get("tokens") or {}).get("workspace_label")
+
+
+def invoke_autoname(*arguments):
     command = [sys.executable, os.path.join(os.path.dirname(__file__), "rename_workspaces.py")]
-    command.extend(["--workspace", workspace_id])
-    return subprocess.run(command, check=False).returncode
+    return subprocess.run([*command, *arguments], check=False).returncode
 
 
 def main():
@@ -120,15 +123,20 @@ def main():
         return 0
     event = read_json_env("HERDR_PLUGIN_EVENT_JSON")
     status = str(event_value(event, "agent_status") or "").lower()
-    if status not in TRIGGER_STATUSES:
-        return 0
     pane_id = str(event_value(event, "pane_id") or os.environ.get("HERDR_PANE_ID", ""))
     workspace_id = str(
         event_value(event, "workspace_id") or os.environ.get("HERDR_WORKSPACE_ID", "")
     )
     if not pane_id or not workspace_id:
         return 0
-    pane = pane_from_snapshot(pane_id)
+    state = autoname.snapshot()
+    if needs_sidebar_label(find(state.get("workspaces", []), "workspace_id", workspace_id)):
+        # Relabel and regroup the Sidebar without a model call, so a new
+        # workspace is visible and placed with its project before its first turn.
+        invoke_autoname("configure")
+    if status not in TRIGGER_STATUSES:
+        return 0
+    pane = find(state.get("panes", []), "pane_id", pane_id)
     if not pane:
         return 0
     messages = autoname.native_session_messages(pane)
@@ -173,7 +181,7 @@ def main():
 
         # Keep the lock through naming so simultaneous pane events cannot spend
         # twice or overwrite one another's counters.
-        code = invoke_autoname(workspace_id)
+        code = invoke_autoname("--workspace", workspace_id)
         if code == 0:
             first = not previous.get("named")
             previous["pending_turns"] = 0 if first else pending % threshold
