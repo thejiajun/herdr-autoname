@@ -242,11 +242,12 @@ def validate(payload,allowed):
         result[row['id']]={k:clean(row[k])[:n] for k,n in [('title',36),('request',160),('progress',200),('next',120)]}
     return result
 
-def refresh(limit=8):
+def refresh(limit=8,pane_id=None):
     with (state_dir()/'refresh.lock').open('a') as lock:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: return {'busy':True}
         cache=load_cache(); agents=herdr('agent','list')['agents']; pending=[]; now=time.time()
+        if pane_id: agents=[a for a in agents if a['pane_id']==pane_id]
         for agent in agents:
             key=identity(agent); parsed=signals(agent); old=cache.get(key,{})
             entry={**old, 'parsed':{k:v for k,v in parsed.items() if k!='turns'},'pane_id':agent['pane_id']}
@@ -279,8 +280,16 @@ def refresh(limit=8):
             return {'agents':len(agents),'summarized':0,'error':type(exc).__name__}
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser(); parser.add_argument('--limit',type=int,default=8); parser.add_argument('--check',action='store_true')
+    parser=argparse.ArgumentParser(); parser.add_argument('--limit',type=int,default=8); parser.add_argument('--check',action='store_true'); parser.add_argument('--event',action='store_true')
     args=parser.parse_args()
-    if args.check:
+    if args.event:
+        # Status hook: summarize only the pane whose agent just finished a turn.
+        try: event=json.loads(os.environ.get('HERDR_PLUGIN_EVENT_JSON') or '{}')
+        except ValueError: event={}
+        data=event.get('data') if isinstance(event.get('data'),dict) else event
+        pane=data.get('pane_id') or os.environ.get('HERDR_PANE_ID')
+        if str(data.get('agent_status','')).lower() in ('done','idle','blocked') and pane:
+            print(json.dumps(refresh(args.limit,pane),ensure_ascii=False))
+    elif args.check:
         cache=load_cache(); print(json.dumps({'state_dir':str(state_dir()),'cached':len(cache),'summaries':sum(bool(v.get('summary')) for v in cache.values())}))
     else: print(json.dumps(refresh(args.limit),ensure_ascii=False))
