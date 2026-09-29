@@ -26,7 +26,7 @@ Automatically rename Herdr workspaces, tabs, and panes from the latest real conv
 ## Install as a Herdr Plugin
 
 ```bash
-herdr plugin install thejiajun/jc-herdr/autoname
+herdr plugin install thejiajun/jc-herdr-plugins/autoname
 ```
 
 The plugin registers:
@@ -61,7 +61,7 @@ herdr plugin log list --plugin thejiajun.autoname
 ### Local plugin development
 
 ```bash
-herdr plugin link /path/to/jc-herdr/autoname
+herdr plugin link /path/to/jc-herdr-plugins/autoname
 ```
 
 ## Install as a standalone CLI
@@ -69,19 +69,19 @@ herdr plugin link /path/to/jc-herdr/autoname
 With `uv`:
 
 ```bash
-uv tool install "git+https://github.com/thejiajun/jc-herdr.git#subdirectory=autoname"
+uv tool install "git+https://github.com/thejiajun/jc-herdr-plugins.git#subdirectory=autoname"
 ```
 
 Upgrade or reinstall:
 
 ```bash
-uv tool install --force "git+https://github.com/thejiajun/jc-herdr.git#subdirectory=autoname"
+uv tool install --force "git+https://github.com/thejiajun/jc-herdr-plugins.git#subdirectory=autoname"
 ```
 
 With `pipx`:
 
 ```bash
-pipx install "git+https://github.com/thejiajun/jc-herdr.git#subdirectory=autoname"
+pipx install "git+https://github.com/thejiajun/jc-herdr-plugins.git#subdirectory=autoname"
 ```
 
 ## Providers

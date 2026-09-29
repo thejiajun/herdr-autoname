@@ -23,7 +23,7 @@ A Herdr popup that lists every agent in a table. Search by name, real working fo
 ## Install
 
 ```sh
-herdr plugin install thejiajun/jc-herdr/agent-switcher
+herdr plugin install thejiajun/jc-herdr-plugins/agent-switcher
 ```
 
 Bind keys in `~/.config/herdr/config.toml`. If `next_agent` / `previous_agent` under `[keys]` use the same keys, remove them first:

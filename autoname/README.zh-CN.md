@@ -25,7 +25,7 @@
 ## 作为 Herdr Plugin 安装
 
 ```bash
-herdr plugin install thejiajun/jc-herdr/autoname
+herdr plugin install thejiajun/jc-herdr-plugins/autoname
 ```
 
 打开设置面板：
@@ -57,19 +57,19 @@ Plugin 和独立 CLI 共用同一个设置文件 `~/.config/herdr/autoname.env`�
 ## 作为独立 CLI 安装
 
 ```bash
-uv tool install "git+https://github.com/thejiajun/jc-herdr.git#subdirectory=autoname"
+uv tool install "git+https://github.com/thejiajun/jc-herdr-plugins.git#subdirectory=autoname"
 ```
 
 覆盖升级：
 
 ```bash
-uv tool install --force "git+https://github.com/thejiajun/jc-herdr.git#subdirectory=autoname"
+uv tool install --force "git+https://github.com/thejiajun/jc-herdr-plugins.git#subdirectory=autoname"
 ```
 
 也可以使用：
 
 ```bash
-pipx install "git+https://github.com/thejiajun/jc-herdr.git#subdirectory=autoname"
+pipx install "git+https://github.com/thejiajun/jc-herdr-plugins.git#subdirectory=autoname"
 ```
 
 ## Provider
