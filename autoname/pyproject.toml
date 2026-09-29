@@ -23,9 +23,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/thejiajun/herdr-autoname"
-Repository = "https://github.com/thejiajun/herdr-autoname"
-Issues = "https://github.com/thejiajun/herdr-autoname/issues"
+Homepage = "https://github.com/thejiajun/jc-herdr"
+Repository = "https://github.com/thejiajun/jc-herdr"
+Issues = "https://github.com/thejiajun/jc-herdr/issues"
 
 [project.scripts]
 herdr-autoname = "rename_workspaces:cli"
