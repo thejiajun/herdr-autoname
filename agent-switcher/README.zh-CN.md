@@ -23,7 +23,7 @@
 ## 安装
 
 ```sh
-herdr plugin install thejiajun/jc-herdr/agent-switcher
+herdr plugin install thejiajun/jc-herdr-plugins/agent-switcher
 ```
 
 在 `~/.config/herdr/config.toml` 里绑定快捷键。如果 `[keys]` 里的 `next_agent` / `previous_agent` 占用了同样的键，先把它们移除：

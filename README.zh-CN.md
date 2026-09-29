@@ -1,4 +1,4 @@
-# jc-herdr
+# jc-herdr-plugins
 
 [English](README.md)
 
@@ -6,8 +6,8 @@
 
 | 插件 | 用途 | 安装 |
 |---|---|---|
-| [autoname](autoname/) | 根据每个 Agent 最近的对话，自动命名 Herdr 的 Workspace、Tab 和 Pane。 | `herdr plugin install thejiajun/jc-herdr/autoname` |
-| [agent-switcher](agent-switcher/) | 弹窗按名称、工作目录或对话内容搜索 Agent，预览后跳转到对应 Pane。 | `herdr plugin install thejiajun/jc-herdr/agent-switcher` |
+| [autoname](autoname/) | 根据每个 Agent 最近的对话，自动命名 Herdr 的 Workspace、Tab 和 Pane。 | `herdr plugin install thejiajun/jc-herdr-plugins/autoname` |
+| [agent-switcher](agent-switcher/) | 弹窗按名称、工作目录或对话内容搜索 Agent，预览后跳转到对应 Pane。 | `herdr plugin install thejiajun/jc-herdr-plugins/agent-switcher` |
 
 Agent Switcher 的后台总结复用 Autoname 的 Provider 配置，两个都装才有总结。
 
@@ -17,13 +17,13 @@ Agent Switcher 的后台总结复用 Autoname 的 Provider 配置，两个都装
 
 ```sh
 herdr plugin uninstall thejiajun.autoname
-herdr plugin install thejiajun/jc-herdr/autoname
+herdr plugin install thejiajun/jc-herdr-plugins/autoname
 ```
 
 命令行版改为从子目录安装：
 
 ```sh
-uv tool install --force "git+https://github.com/thejiajun/jc-herdr.git#subdirectory=autoname"
+uv tool install --force "git+https://github.com/thejiajun/jc-herdr-plugins.git#subdirectory=autoname"
 ```
 
 ## 开发
