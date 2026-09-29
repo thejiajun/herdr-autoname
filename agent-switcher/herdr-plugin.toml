@@ -1,0 +1,36 @@
+id = "thejiajun.agent-switcher"
+name = "Agent Switcher"
+version = "0.3.0"
+min_herdr_version = "0.9.0"
+description = "Search agents, preview terminal output and jump to their panes."
+platforms = ["macos", "linux"]
+[[actions]]
+id = "next"
+title = "Switch to next agent"
+command = ["python3", "switcher.py", "--open", "1"]
+[[actions]]
+id = "previous"
+title = "Switch to previous agent"
+command = ["python3", "switcher.py", "--open", "-1"]
+[[panes]]
+id = "picker"
+title = "Agent Switcher"
+placement = "popup"
+width = "90%"
+height = "85%"
+command = ["python3", "switcher.py"]
+
+[[actions]]
+id = "browse"
+title = "Search agents"
+command = ["python3", "switcher.py", "--open", "0"]
+
+[[actions]]
+id = "refresh"
+title = "Refresh conversation summaries"
+command = ["python3", "context_data.py"]
+
+[[actions]]
+id = "diagnostics"
+title = "Summary cache diagnostics"
+command = ["python3", "context_data.py", "--check"]
