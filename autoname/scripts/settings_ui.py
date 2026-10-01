@@ -146,13 +146,13 @@ def preview_lines():
         if item.get("separator"):
             lines.append("")
             continue
-        icon = autoname.STATUS_ICONS.get(item["status"], "·")
-        lines.append(f"{icon} {item['label']}")
         if item["context"]:
-            lines.append(f"  {item['context']}")
+            lines.append(item["context"])
+        lines.append(f"{item['tree_branch']} {item['label']}")
         for pane in agents.get(item["workspace_id"], []):
             pane_icon = autoname.STATUS_ICONS.get(pane["status"], "·")
             lines.append(f"    {pane_icon} {pane['label']}")
+            lines.append(f"      {pane['context']}")
     return lines
 
 

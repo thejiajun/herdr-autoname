@@ -2,12 +2,18 @@
 """Open the plugin's interactive settings popup."""
 
 import os
+import shutil
 import subprocess
 import sys
 
 
 def main():
-    herdr = os.environ.get("HERDR_BIN_PATH", "herdr").strip() or "herdr"
+    configured_herdr = os.environ.get("HERDR_BIN_PATH", "").strip()
+    herdr = (
+        configured_herdr
+        if configured_herdr and shutil.which(configured_herdr)
+        else shutil.which("herdr") or "herdr"
+    )
     command = [
         herdr,
         "plugin",

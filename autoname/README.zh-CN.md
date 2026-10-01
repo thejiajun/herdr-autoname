@@ -1,5 +1,7 @@
 # herdr-autoname
 
+侧栏名称、Nerd Font 图标、颜色和 TUI 状态标识的设计说明：[视觉系统](docs/visual-system.zh-CN.md)。
+
 [English](README.md)
 
 根据每个编程 Agent 最近的真实会话，自动更新 Herdr 的 Workspace、Tab 和 Pane 名称。

@@ -28,7 +28,12 @@ AUTONAME_ENV = os.path.expanduser("~/.config/herdr/autoname.env")
 STATE_DIR = os.path.expanduser("~/.local/share/herdr-autoname")
 # Plugin 0.16.0 kept its settings in Herdr's per-plugin config directory.
 PLUGIN_CONFIG_DIR = os.environ.get("HERDR_PLUGIN_CONFIG_DIR", "").strip()
-HERDR_BIN = os.environ.get("HERDR_BIN_PATH", "herdr").strip() or "herdr"
+_configured_herdr = os.environ.get("HERDR_BIN_PATH", "").strip()
+HERDR_BIN = (
+    _configured_herdr
+    if _configured_herdr and shutil.which(_configured_herdr)
+    else shutil.which("herdr") or "herdr"
+)
 MAX_PANE_CHARS = 1_200
 # Budgets per pane, measured against real sessions: the current ask earns the
 # most room, the previous one only frames it, and the reply only has to say
@@ -61,11 +66,11 @@ REQUEST_LOG_KEEP = 200
 LLM_MAX_ATTEMPTS = 3
 LLM_RETRY_BACKOFF = 1.5
 AGENT_LABELS = {
-    "opencode": "◈ opencode",
-    "claude": "✦ claude",
-    "codex": "⌘ codex",
+    "opencode": " opencode",
+    "claude": " claude",
+    "codex": " codex",
     "dsh-tui": "◆ dsh-tui",
-    "shell": "› shell",
+    "shell": " shell",
 }
 STATUS_ICONS = {
     "working": "▶",
@@ -108,14 +113,33 @@ PROVIDER_LABELS = {
 HERDR_CONFIG = os.path.expanduser(
     os.environ.get("HERDR_CONFIG_PATH", "~/.config/herdr/config.toml")
 )
+AGENT_STATE_COLORS = {
+    "working": "#df8e1d",
+    "blocked": "#d20f39",
+    "done": "#40a02b",
+    "idle": "#6c6f85",
+    "unknown": "#9ca0b0",
+}
+
+
+def agent_state_row(kind, *, with_icon=False):
+    tokens = ['"state_icon"'] if with_icon else []
+    tokens.extend(
+        '{ token = "$' + kind + '_' + state + '", fg = "' + color
+        + '", bold = ' + ('true' if kind == "title" else 'false') + ' }'
+        for state, color in AGENT_STATE_COLORS.items()
+    )
+    return "[" + ", ".join(tokens) + "]"
+
+
 SIDEBAR_ROWS = {
     "ui.sidebar.spaces": (
-        'rows = [["state_icon", { token = "$workspace_label", bold = true }], '
-        '["$context"]]'
+        'rows = [["$context"], '
+        '[{ token = "$workspace_label", bold = true }]]'
     ),
     "ui.sidebar.agents": (
-        'rows = [["state_icon", { token = "pane", bold = true }], '
-        '["agent", { token = "$workspace_plain", bold = false }]]'
+        "rows = [" + agent_state_row("title", with_icon=True)
+        + ", " + agent_state_row("task") + "]"
     ),
 }
 
@@ -1807,18 +1831,30 @@ def configure_sidebar(rows, names=None):
 
 def sync_project_metadata(rows, names=None):
     renamed = {item["workspace_id"]: item["workspace"] for item in (names or [])}
+    renamed_panes = {
+        pane_id: pane_name
+        for item in (names or [])
+        for pane_id, pane_name in item["panes"].items()
+    }
     contexts = grouped_sidebar_contexts(rows)
+    branches = sidebar_tree_branches(rows)
     updated = 0
     for row in rows:
         workspace_name = renamed.get(row["workspace_id"], row["current_workspace"])
         workspace_name = workspace_name.strip().strip("[]").strip()
         context = contexts[row["workspace_id"]]
-        tokens = [f"workspace_label=[{workspace_name}]"]
+        display_name = sidebar_workspace_name(row, workspace_name)
+        tokens = [
+            "workspace_label=" + sidebar_tree_label(
+                branches[row["workspace_id"]], display_name, has_context=bool(context)
+            )
+        ]
         if context:
             tokens.append(f"context={context}")
         command = [
             "herdr", "workspace", "report-metadata", row["workspace_id"],
             "--source", "herdr-autoname", "--clear-token", "project",
+            "--clear-token", "tree_branch",
         ]
         if not context:
             command.extend(["--clear-token", "context"])
@@ -1830,13 +1866,17 @@ def sync_project_metadata(rows, names=None):
             pane_command = [
                 "herdr", "pane", "report-metadata", pane["pane_id"],
                 "--source", "herdr-autoname", "--clear-token", "project",
+                "--clear-token", "workspace_plain",
+                "--clear-token", "agent_label",
+                "--clear-token", "workspace_title",
+                "--clear-token", "agent_task",
             ]
-            if pane["agent"] != "shell":
-                pane_command.extend([
-                    "--token", f"workspace_plain={plain_workspace_name(workspace_name)}",
-                ])
-            else:
-                pane_command.extend(["--clear-token", "workspace_plain"])
+            pane_command.extend(agent_state_patch(
+                pane["status"], display_name,
+                agent_task_label(
+                    pane["agent"], renamed_panes.get(pane["pane_id"], pane["current_label"])
+                ),
+            ))
             run(pane_command)
     return updated
 
@@ -1859,9 +1899,79 @@ def grouped_sidebar_contexts(rows):
     seen = set()
     for row in rows:
         key = row["group_key"]
-        contexts[row["workspace_id"]] = sidebar_context(row) if key not in seen else ""
+        context = sidebar_context(row)
+        contexts[row["workspace_id"]] = f" {context}" if key not in seen and context else ""
         seen.add(key)
     return contexts
+
+
+def sidebar_workspace_name(row, name):
+    """Distinguish Herdr's default directory label from its parent heading."""
+    if plain_workspace_name(name) == row["project"]:
+        return "终端" if all(pane["agent"] == "shell" for pane in row["panes"]) else "新会话"
+    return name
+
+
+def sidebar_tree_branches(rows):
+    """Connect workspaces beneath their shared project heading."""
+    by_id = {row["workspace_id"]: row for row in rows}
+    ordered = [by_id[workspace_id] for workspace_id in grouped_workspace_ids(rows)]
+    last_by_group = {}
+    for row in ordered:
+        last_by_group[row["group_key"]] = row["workspace_id"]
+    return {
+        row["workspace_id"]: (
+            "└" if last_by_group[row["group_key"]] == row["workspace_id"] else "├"
+        )
+        for row in ordered
+    }
+
+
+def sidebar_tree_label(branch, name, *, has_context):
+    """Herdr indents a label by two cells when its context row is present."""
+    return ("" if has_context else "\u2800\u2800") + f"{branch} {name}"
+
+
+def agent_task_label(agent, pane_name):
+    icon = AGENT_LABELS.get(agent, "󰚩").split(" ", 1)[0]
+    return f"{icon} {plain_workspace_name(pane_name or '') or '等待任务'}"
+
+
+def normalized_agent_state(status):
+    value = str(status or "unknown").lower()
+    value = {"waiting": "blocked", "error": "blocked", "completed": "done"}.get(value, value)
+    return value if value in AGENT_STATE_COLORS else "unknown"
+
+
+def agent_state_patch(status, title, task):
+    state = normalized_agent_state(status)
+    command = []
+    for candidate in AGENT_STATE_COLORS:
+        command.extend(["--clear-token", f"title_{candidate}"])
+        command.extend(["--clear-token", f"task_{candidate}"])
+    command.extend(["--token", f"title_{state}={title}"])
+    command.extend(["--token", f"task_{state}={task}"])
+    return command
+
+
+def active_agent_state(tokens):
+    for state in AGENT_STATE_COLORS:
+        title, task = tokens.get(f"title_{state}"), tokens.get(f"task_{state}")
+        if title and task:
+            return state, title, task
+    return None
+
+
+def sync_agent_state(pane_id, status, tokens):
+    active = active_agent_state(tokens)
+    if not active:
+        return False
+    state, title, task = active
+    if state == normalized_agent_state(status):
+        return True
+    command = ["herdr", "pane", "report-metadata", pane_id, "--source", "herdr-autoname"]
+    command.extend(agent_state_patch(status, title, task))
+    return run(command)[0] == 0
 
 
 def sidebar_preview_data(names, rows):
@@ -1871,6 +1981,7 @@ def sidebar_preview_data(names, rows):
     spaces = []
     agents = []
     contexts = grouped_sidebar_contexts(ordered_rows)
+    branches = sidebar_tree_branches(ordered_rows)
     status_rank = {
         "working": 0, "waiting": 1, "error": 2, "idle": 3,
         "completed": 4, "done": 4, "unknown": 5,
@@ -1886,7 +1997,10 @@ def sidebar_preview_data(names, rows):
         spaces.append({
             "workspace_id": row["workspace_id"],
             "status": status,
-            "label": f"[{item['workspace'].strip().strip('[]').strip()}]",
+            "tree_branch": branches[row["workspace_id"]],
+            "label": sidebar_workspace_name(
+                row, item["workspace"].strip().strip("[]").strip()
+            ),
             "context": contexts[row["workspace_id"]],
         })
         for pane in row["panes"]:
@@ -1894,9 +2008,14 @@ def sidebar_preview_data(names, rows):
                 "workspace_id": row["workspace_id"],
                 "pane_id": pane["pane_id"],
                 "status": pane["status"],
-                "label": item["panes"].get(pane["pane_id"], pane["current_label"]),
+                "label": sidebar_workspace_name(
+                    row, item["workspace"].strip().strip("[]").strip()
+                ),
                 "context": (
-                    f"{pane['agent']} · {plain_workspace_name(item['workspace'])}"
+                    agent_task_label(
+                        pane["agent"],
+                        item["panes"].get(pane["pane_id"], pane["current_label"]),
+                    )
                 ),
             })
         previous_group = row["group_key"]
@@ -1932,9 +2051,10 @@ def print_sidebar_preview(names, rows):
             spaces.append(("", False))
             agents.append(("", False))
             continue
-        left = [(f"{STATUS_ICONS.get(item['status'], '·')} {item['label']}", True)]
+        left = []
         if item["context"]:
-            left.append((f"  {item['context']}", False))
+            left.append((item["context"], False))
+        left.append((f"{item['tree_branch']} {item['label']}", True))
         right = agents_by_workspace.get(item["workspace_id"], [])
         block_size = max(len(left), len(right))
         spaces.extend(left + [("", False)] * (block_size - len(left)))

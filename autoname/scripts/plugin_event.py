@@ -14,6 +14,7 @@ import rename_workspaces as autoname
 
 DEFAULT_TRIGGER_EVERY = 3
 TRIGGER_STATUSES = {"blocked", "done", "idle"}
+WAITING_LABEL = "💤 等待任务"
 
 
 def read_json_env(name):
@@ -112,15 +113,37 @@ def needs_sidebar_label(workspace):
     return bool(workspace) and not (workspace.get("tokens") or {}).get("workspace_label")
 
 
+def needs_agent_label(pane):
+    tokens = (pane or {}).get("tokens") or {}
+    return bool(pane) and not autoname.active_agent_state(tokens)
+
+
 def invoke_autoname(*arguments):
     command = [sys.executable, os.path.join(os.path.dirname(__file__), "rename_workspaces.py")]
     return subprocess.run([*command, *arguments], check=False).returncode
 
 
+def name_untracked_pane(pane, workspace_id):
+    """Give panes without a native session a label when Herdr leaves it blank."""
+    if pane.get("label") and pane["label"] not in (WAITING_LABEL, " 等待任务"):
+        return 0
+    title = (pane.get("terminal_title_stripped") or "").strip()
+    project = os.path.basename((pane.get("foreground_cwd") or pane.get("cwd") or "").rstrip("/"))
+    if not title or title == project:
+        # There is no task evidence in a bare agent prompt.
+        if pane.get("label") == WAITING_LABEL:
+            return 0
+        code, _, stderr = autoname.run(["herdr", "pane", "rename", pane["pane_id"], WAITING_LABEL])
+        if code:
+            print(stderr or "Could not label idle pane", file=sys.stderr)
+        else:
+            invoke_autoname("configure")
+        return code
+    return invoke_autoname("--workspace", workspace_id)
+
+
 def main():
     autoname.migrate_plugin_settings()
-    if not enabled():
-        return 0
     event = read_json_env("HERDR_PLUGIN_EVENT_JSON")
     status = str(event_value(event, "agent_status") or "").lower()
     pane_id = str(event_value(event, "pane_id") or os.environ.get("HERDR_PANE_ID", ""))
@@ -130,18 +153,28 @@ def main():
     if not pane_id or not workspace_id:
         return 0
     state = autoname.snapshot()
-    if needs_sidebar_label(find(state.get("workspaces", []), "workspace_id", workspace_id)):
+    if (needs_sidebar_label(find(state.get("workspaces", []), "workspace_id", workspace_id))
+            or needs_agent_label(find(state.get("panes", []), "pane_id", pane_id))):
         # Relabel and regroup the Sidebar without a model call, so a new
         # workspace is visible and placed with its project before its first turn.
         invoke_autoname("configure")
+        state = autoname.snapshot()
+    pane = find(state.get("panes", []), "pane_id", pane_id)
+    if pane and status:
+        autoname.sync_agent_state(pane_id, status, pane.get("tokens") or {})
+    if not enabled():
+        return 0
     if status not in TRIGGER_STATUSES:
         return 0
-    pane = find(state.get("panes", []), "pane_id", pane_id)
     if not pane:
         return 0
     messages = autoname.native_session_messages(pane)
     if messages is None:
-        return 0
+        _, lock_path = state_paths()
+        with open(lock_path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            current = find(autoname.snapshot().get("panes", []), "pane_id", pane_id)
+            return name_untracked_pane(current, workspace_id) if current else 0
     fingerprints = user_turn_fingerprints(messages)
     if not fingerprints:
         return 0

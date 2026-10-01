@@ -47,8 +47,121 @@ class PluginEventTests(unittest.TestCase):
         self.assertFalse(plugin_event.needs_sidebar_label({"tokens": {"workspace_label": "[a]"}}))
         self.assertFalse(plugin_event.needs_sidebar_label(None))
 
+    def test_pane_without_agent_label_needs_sidebar_metadata(self):
+        self.assertTrue(plugin_event.needs_agent_label({"pane_id": "w1:p1"}))
+        self.assertTrue(plugin_event.needs_agent_label({"tokens": {"task_idle": " 修复排版"}}))
+        self.assertFalse(plugin_event.needs_agent_label({"tokens": {
+            "task_idle": " 修复排版", "title_idle": "🏷️ Herdr自动命名",
+        }}))
+
+    def test_untracked_pane_uses_visible_task_when_label_is_blank(self):
+        pane = {"pane_id": "w1:p1", "label": None,
+                "terminal_title_stripped": "修复登录错误 | app", "cwd": "/tmp/app"}
+        with mock.patch.object(plugin_event, "invoke_autoname", return_value=0) as invoke:
+            self.assertEqual(plugin_event.name_untracked_pane(pane, "w1"), 0)
+        invoke.assert_called_once_with("--workspace", "w1")
+
+    def test_untracked_bare_prompt_gets_idle_label(self):
+        pane = {"pane_id": "w1:p1", "label": None,
+                "terminal_title_stripped": "app", "cwd": "/tmp/app"}
+        with mock.patch.object(plugin_event.autoname, "run", return_value=(0, "", "")) as run, \
+             mock.patch.object(plugin_event, "invoke_autoname", return_value=0) as invoke:
+            self.assertEqual(plugin_event.name_untracked_pane(pane, "w1"), 0)
+        run.assert_called_once_with(["herdr", "pane", "rename", "w1:p1", plugin_event.WAITING_LABEL])
+        invoke.assert_called_once_with("configure")
+
+    def test_labeled_untracked_pane_is_not_renamed_again(self):
+        pane = {"pane_id": "w1:p1", "label": "已有任务"}
+        with mock.patch.object(plugin_event, "invoke_autoname") as invoke:
+            self.assertEqual(plugin_event.name_untracked_pane(pane, "w1"), 0)
+        invoke.assert_not_called()
+
+    def test_waiting_pane_gets_task_label_when_title_changes(self):
+        pane = {"pane_id": "w1:p1", "label": plugin_event.WAITING_LABEL,
+                "terminal_title_stripped": "修复登录错误 | app", "cwd": "/tmp/app"}
+        with mock.patch.object(plugin_event, "invoke_autoname", return_value=0) as invoke:
+            self.assertEqual(plugin_event.name_untracked_pane(pane, "w1"), 0)
+        invoke.assert_called_once_with("--workspace", "w1")
+
 
 class SidebarLayoutTests(unittest.TestCase):
+    def test_default_workspace_label_does_not_repeat_project_heading(self):
+        autoname = plugin_event.autoname
+        row = {"project": "pika_work", "panes": [{"agent": "codex"}]}
+        self.assertEqual(autoname.sidebar_workspace_name(row, "pika_work"), "新会话")
+        row["panes"] = [{"agent": "shell"}]
+        self.assertEqual(autoname.sidebar_workspace_name(row, "pika_work"), "终端")
+        self.assertEqual(autoname.sidebar_workspace_name(row, "🔍 调研项目"), "🔍 调研项目")
+
+    def test_tree_branches_connect_workspaces_under_each_project(self):
+        rows = [
+            {"workspace_id": "a1", "group_key": "path:/a", "remote_host": ""},
+            {"workspace_id": "b1", "group_key": "path:/b", "remote_host": ""},
+            {"workspace_id": "a2", "group_key": "path:/a", "remote_host": ""},
+            {"workspace_id": "r1", "group_key": "remote:server", "remote_host": "server"},
+        ]
+        self.assertEqual(plugin_event.autoname.sidebar_tree_branches(rows), {
+            "a1": "├", "a2": "└", "b1": "└", "r1": "└",
+        })
+
+    def test_project_heading_is_shown_once_above_its_workspaces(self):
+        autoname = plugin_event.autoname
+        rows = [
+            {"workspace_id": "a1", "group_key": "path:/a", "project": "project-a",
+             "remote_host": "", "git_status": "main"},
+            {"workspace_id": "a2", "group_key": "path:/a", "project": "project-a",
+             "remote_host": "", "git_status": "main"},
+        ]
+        self.assertEqual(autoname.grouped_sidebar_contexts(rows), {
+            "a1": " project-a · main", "a2": "",
+        })
+
+    def test_tree_branches_keep_one_column_with_one_project_heading(self):
+        autoname = plugin_event.autoname
+        first = autoname.sidebar_tree_label("├", "🔍 首项", has_context=True)
+        later = autoname.sidebar_tree_label("└", "💬 后项", has_context=False)
+        self.assertEqual(first, "├ 🔍 首项")
+        self.assertEqual(later, "⠀⠀└ 💬 后项")
+
+    def test_agent_title_matches_space_and_task_is_below(self):
+        autoname = plugin_event.autoname
+        row = {
+            "workspace_id": "w1", "group_key": "path:/projects", "project": "projects",
+            "remote_host": "", "git_status": "—", "current_workspace": "🏷️ Herdr自动命名",
+            "panes": [{"pane_id": "p1", "agent": "codex", "status": "working",
+                       "current_label": "🏷️ 修复树线对齐位置"}],
+        }
+        names = [{"workspace_id": "w1", "workspace": "🏷️ Herdr自动命名",
+                  "panes": {"p1": "🏷️ 修复树线对齐位置"}}]
+        preview = autoname.sidebar_preview_data(names, [row])
+        self.assertEqual(preview["spaces"][0]["label"], preview["agents"][0]["label"])
+        self.assertIn("修复树线对齐位置", preview["agents"][0]["context"])
+        self.assertEqual(preview["agents"][0]["context"], " 修复树线对齐位置")
+
+    def test_agent_state_switch_preserves_title_and_task(self):
+        autoname = plugin_event.autoname
+        tokens = {"title_idle": "🏷️ Herdr自动命名", "task_idle": " 修复排版"}
+        with mock.patch.object(autoname, "run", return_value=(0, "", "")) as run:
+            self.assertTrue(autoname.sync_agent_state("p1", "working", tokens))
+        command = run.call_args.args[0]
+        self.assertIn("title_working=🏷️ Herdr自动命名", command)
+        self.assertIn("task_working= 修复排版", command)
+        self.assertIn("title_idle", command)
+
+    def test_emoji_names_remain_unchanged_without_sidebar_brackets(self):
+        autoname = plugin_event.autoname
+        row = {
+            "workspace_id": "w1", "current_workspace": "🔍 旧主题",
+            "tabs": [{"tab_id": "w1:t1"}],
+            "panes": [{"pane_id": "w1:p1"}],
+        }
+        names = autoname.normalize_item(
+            ["🔍 新主题", ["🔍 短标签"], ["🔍 排查错误"]], row
+        )
+        self.assertEqual(names["workspace"], "🔍 新主题")
+        self.assertEqual(names["tabs"]["w1:t1"], "🔍 短标签")
+        self.assertEqual(names["panes"]["w1:p1"], "🔍 排查错误")
+
     def test_partial_run_lays_out_every_workspace(self):
         everything = [{"workspace_id": "w1"}, {"workspace_id": "w2"}]
         with mock.patch.object(plugin_event.autoname, "collect", return_value=(everything, set())) as collect:

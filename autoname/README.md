@@ -1,5 +1,7 @@
 # herdr-autoname
 
+Visual design notes for Sidebar labels, Nerd Font icons, colors, and TUI status markers: [视觉系统（中文）](docs/visual-system.zh-CN.md).
+
 [简体中文](README.zh-CN.md)
 
 Automatically rename Herdr workspaces, tabs, and panes from the latest real conversations in each coding-agent session.
