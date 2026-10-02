@@ -16,7 +16,7 @@ import input_source
 STATUS = {'working':'运行中', 'blocked':'等待确认', 'done':'已完成', 'idle':'空闲', 'unknown':'未知'}
 
 def cli(*args, raw=False):
-    p = subprocess.run([os.environ.get('HERDR_BIN_PATH') or 'herdr', *args], capture_output=True, text=True, timeout=5)
+    p = subprocess.run([context_data.herdr_bin(), *args], capture_output=True, text=True, timeout=5)
     if p.returncode:
         raise RuntimeError((p.stderr or p.stdout).strip() or 'Herdr 调用失败')
     if raw:

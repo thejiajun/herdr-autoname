@@ -89,6 +89,9 @@ class InteractionTests(unittest.TestCase):
         self.assertIsNone(result);cli.assert_not_called()
 
 class ContextTests(unittest.TestCase):
+    def test_stale_herdr_bin_path_falls_back_to_path(self):
+        with patch.dict('os.environ', {'HERDR_BIN_PATH':'/missing/herdr'}), patch('context_data.shutil.which', return_value='/usr/local/bin/herdr'):
+            self.assertEqual(context_data.herdr_bin(), '/usr/local/bin/herdr')
     def test_no_previous_reply_for_new_request(self):
         with patch('context_data.messages',return_value=([('user','旧请求'),('assistant','旧回复'),('user','新请求')],'native')):
             s=context_data.signals({})

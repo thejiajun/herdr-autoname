@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -18,8 +19,14 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 
+def herdr_bin():
+    configured = os.environ.get('HERDR_BIN_PATH')
+    if configured and os.access(configured, os.X_OK) and Path(configured).is_file():
+        return configured
+    return shutil.which('herdr') or 'herdr'
+
 def herdr(*args):
-    p = subprocess.run([os.environ.get('HERDR_BIN_PATH') or 'herdr', *args], capture_output=True, text=True, timeout=10)
+    p = subprocess.run([herdr_bin(), *args], capture_output=True, text=True, timeout=10)
     if p.returncode:
         raise RuntimeError('Herdr API unavailable')
     return json.loads(p.stdout)['result']
@@ -224,7 +231,7 @@ def provider_adapter():
     path=Path(plugin['plugin_root'])/'scripts/rename_workspaces.py'
     spec=importlib.util.spec_from_file_location('autoname_summary_adapter',path)
     module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-    p=subprocess.run([os.environ.get('HERDR_BIN_PATH') or 'herdr','plugin','config-dir','thejiajun.autoname'],capture_output=True,text=True,check=True,timeout=10)
+    p=subprocess.run([herdr_bin(),'plugin','config-dir','thejiajun.autoname'],capture_output=True,text=True,check=True,timeout=10)
     module.AUTONAME_ENV=str(Path(p.stdout.strip())/'autoname.env')
     module.SYSTEM_PROMPT=PROMPT
     module.naming_payload=lambda rows: rows
