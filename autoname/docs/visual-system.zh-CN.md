@@ -56,15 +56,15 @@ Agents 示例中的 `●` / `○` 只是位置示意；真实颜色和形状取�
 
 ## 3. 颜色
 
-当前 Herdr 配置使用 `catppuccin-latte`、`status_indicators = "dots"`，且关闭自动明暗切换。状态点和选中底色由 Herdr 控制；插件按 Herdr 的 Agent 状态给 Agents 两行文字上色，并在状态事件到来时立即切换显示字段。配色取自当前浅色主题，切换主题时需要重新检查对比度。
+本机 Herdr 配置使用 `catppuccin-latte`、`status_indicators = "dots"`，且关闭自动明暗切换；未显式配置主题的远端使用 Herdr 默认的深色 `catppuccin`。状态点和选中底色由 Herdr 控制；插件按 Agent 状态给 Agents 两行文字上色，并在状态事件到来时立即切换显示字段。生成侧栏配置时，插件根据配置的主题选择浅色或深色文字色。
 
-| Agent 状态 | 标题与任务文字 | 用途 |
-| --- | --- | --- |
-| `working` | 暖黄 `#df8e1d` | 正在处理 |
-| `blocked` | 红 `#d20f39` | 需要人处理 |
-| `done` | 绿 `#40a02b` | 已完成 |
-| `idle` | 灰 `#6c6f85` | 暂无活动 |
-| `unknown` | 浅灰 `#9ca0b0` | 状态未确认 |
+| Agent 状态 | 浅色文字 | 深色文字 | 用途 |
+| --- | --- | --- | --- |
+| `working` | `#df8e1d` | `#f9e2af` | 正在处理 |
+| `blocked` | `#d20f39` | `#f38ba8` | 需要人处理 |
+| `done` | `#40a02b` | `#a6e3a1` | 已完成 |
+| `idle` | `#6c6f85` | `#a6adc8` | 暂无活动 |
+| `unknown` | `#9ca0b0` | `#6c7086` | 状态未确认 |
 
 任务类别继续由名称中的 Emoji 辅助识别；颜色只代表运行状态，不代表项目类别。
 

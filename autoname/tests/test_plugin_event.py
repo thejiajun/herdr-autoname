@@ -85,6 +85,22 @@ class PluginEventTests(unittest.TestCase):
 
 
 class SidebarLayoutTests(unittest.TestCase):
+    def test_agent_state_colors_follow_configured_light_or_default_dark_theme(self):
+        autoname = plugin_event.autoname
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "config.toml")
+            for config, expected in (
+                ("[ui]\nstatus_indicators = \"dots\"\n", "#f9e2af"),
+                ("[theme]\nname = \"catppuccin-latte\"\n", "#df8e1d"),
+            ):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(config)
+                self.assertTrue(autoname.ensure_sidebar_layout(path))
+                with open(path, encoding="utf-8") as handle:
+                    updated = handle.read()
+                self.assertIn(expected, updated)
+                self.assertFalse(autoname.ensure_sidebar_layout(path))
+
     def test_default_workspace_label_does_not_repeat_project_heading(self):
         autoname = plugin_event.autoname
         row = {"project": "pika_work", "panes": [{"agent": "codex"}]}

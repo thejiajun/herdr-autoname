@@ -120,14 +120,21 @@ AGENT_STATE_COLORS = {
     "idle": "#6c6f85",
     "unknown": "#9ca0b0",
 }
+AGENT_DARK_STATE_COLORS = {
+    "working": "#f9e2af",
+    "blocked": "#f38ba8",
+    "done": "#a6e3a1",
+    "idle": "#a6adc8",
+    "unknown": "#6c7086",
+}
 
 
-def agent_state_row(kind, *, with_icon=False):
+def agent_state_row(kind, colors, *, with_icon=False):
     tokens = ['"state_icon"'] if with_icon else []
     tokens.extend(
         '{ token = "$' + kind + '_' + state + '", fg = "' + color
         + '", bold = ' + ('true' if kind == "title" else 'false') + ' }'
-        for state, color in AGENT_STATE_COLORS.items()
+        for state, color in colors.items()
     )
     return "[" + ", ".join(tokens) + "]"
 
@@ -137,11 +144,28 @@ SIDEBAR_ROWS = {
         'rows = [["$context"], '
         '[{ token = "$workspace_label", bold = true }]]'
     ),
-    "ui.sidebar.agents": (
-        "rows = [" + agent_state_row("title", with_icon=True)
-        + ", " + agent_state_row("task") + "]"
-    ),
 }
+
+
+def sidebar_rows_for_config(config_text):
+    theme = "catppuccin"
+    in_theme = False
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_theme = stripped == "[theme]"
+        elif in_theme:
+            match = re.match(r'^name\s*=\s*["\']([^"\']+)["\']', stripped)
+            if match:
+                theme = match.group(1).lower()
+    light = theme.endswith(("-latte", "-light", "-day", "-dawn"))
+    colors = AGENT_STATE_COLORS if light else AGENT_DARK_STATE_COLORS
+    rows = dict(SIDEBAR_ROWS)
+    rows["ui.sidebar.agents"] = (
+        "rows = [" + agent_state_row("title", colors, with_icon=True)
+        + ", " + agent_state_row("task", colors) + "]"
+    )
+    return rows
 
 SYSTEM_PROMPT = """给 Herdr 工作空间命名。输入：{"w":[{"n":"当前workspace","t":["当前tab"],"p":[["agent","终端标题","最近对话"]]}]}。
 
@@ -1777,7 +1801,7 @@ def ensure_sidebar_layout(path=HERDR_CONFIG):
         raise RuntimeError(f"Cannot read Herdr config {path}: {exc}") from exc
 
     lines = original.splitlines()
-    for section, desired_rows in SIDEBAR_ROWS.items():
+    for section, desired_rows in sidebar_rows_for_config(original).items():
         header = f"[{section}]"
         try:
             start = next(index for index, line in enumerate(lines) if line.strip() == header)
